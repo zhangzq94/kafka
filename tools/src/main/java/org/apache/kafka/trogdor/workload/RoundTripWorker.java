@@ -35,11 +35,11 @@ import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.utils.ThreadUtils;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.trogdor.common.JsonUtil;
 import org.apache.kafka.trogdor.common.Platform;
-import org.apache.kafka.trogdor.common.ThreadUtils;
 import org.apache.kafka.trogdor.common.WorkerUtils;
 import org.apache.kafka.trogdor.task.TaskWorker;
 import org.apache.kafka.trogdor.task.WorkerStatusTracker;
@@ -147,7 +147,7 @@ public class RoundTripWorker implements TaskWorker {
                 }
                 status.update(new TextNode("Creating " + newTopics.keySet().size() + " topic(s)"));
                 WorkerUtils.createTopics(log, spec.bootstrapServers(), spec.commonClientConf(),
-                    spec.adminClientConf(), newTopics, true);
+                    spec.adminClientConf(), newTopics, false);
                 status.update(new TextNode("Created " + newTopics.keySet().size() + " topic(s)"));
                 toSendTracker = new ToSendTracker(spec.maxMessages());
                 toReceiveTracker = new ToReceiveTracker();
@@ -254,8 +254,8 @@ public class RoundTripWorker implements TaskWorker {
                         spec.valueGenerator().generate(messageIndex));
                     producer.send(record, (metadata, exception) -> {
                         if (exception == null) {
+                            lock.lock();
                             try {
-                                lock.lock();
                                 unackedSends -= 1;
                                 if (unackedSends <= 0)
                                     unackedSendsAreZero.signalAll();
@@ -272,8 +272,8 @@ public class RoundTripWorker implements TaskWorker {
             } catch (Throwable e) {
                 WorkerUtils.abort(log, "ProducerRunnable", e, doneFuture);
             } finally {
+                lock.lock();
                 try {
-                    lock.lock();
                     log.info("{}: ProducerRunnable is exiting.  messagesSent={}; uniqueMessagesSent={}; " +
                                     "ackedSends={}/{}.", id, messagesSent, uniqueMessagesSent,
                             spec.maxMessages() - unackedSends, spec.maxMessages());
@@ -359,8 +359,8 @@ public class RoundTripWorker implements TaskWorker {
                             if (toReceiveTracker.removePending(messageIndex)) {
                                 uniqueMessagesReceived++;
                                 if (uniqueMessagesReceived >= spec.maxMessages()) {
+                                    lock.lock();
                                     try {
-                                        lock.lock();
                                         log.info("{}: Consumer received the full count of {} unique messages.  " +
                                             "Waiting for all {} sends to be acked...", id, spec.maxMessages(), unackedSends);
                                         while (unackedSends > 0)

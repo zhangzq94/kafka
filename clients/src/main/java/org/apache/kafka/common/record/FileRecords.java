@@ -17,7 +17,7 @@
 package org.apache.kafka.common.record;
 
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.network.TransportLayer;
+import org.apache.kafka.common.network.TransferableChannel;
 import org.apache.kafka.common.record.FileLogInputStream.FileChannelRecordBatch;
 import org.apache.kafka.common.utils.AbstractIterator;
 import org.apache.kafka.common.utils.Time;
@@ -29,7 +29,6 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.GatheringByteChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
@@ -135,17 +134,20 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @return A sliced wrapper on this message set limited based on the given position and size
      */
     public FileRecords slice(int position, int size) throws IOException {
+        // Cache current size in case concurrent write changes it
+        int currentSizeInBytes = sizeInBytes();
+
         if (position < 0)
             throw new IllegalArgumentException("Invalid position: " + position + " in read from " + this);
-        if (position > sizeInBytes() - start)
+        if (position > currentSizeInBytes - start)
             throw new IllegalArgumentException("Slice from position " + position + " exceeds end position of " + this);
         if (size < 0)
             throw new IllegalArgumentException("Invalid size: " + size + " in read from " + this);
 
         int end = this.start + position + size;
         // handle integer overflow or if end is beyond the end of the file
-        if (end < 0 || end >= start + sizeInBytes())
-            end = start + sizeInBytes();
+        if (end < 0 || end > start + currentSizeInBytes)
+            end = start + currentSizeInBytes;
         return new FileRecords(file, channel, this.start + position, end, true);
     }
 
@@ -208,11 +210,11 @@ public class FileRecords extends AbstractRecords implements Closeable {
     }
 
     /**
-     * Update the file reference (to be used with caution since this does not reopen the file channel)
-     * @param file The new file to use
+     * Update the parent directory (to be used with caution since this does not reopen the file channel)
+     * @param parentDir The new parent directory
      */
-    public void setFile(File file) {
-        this.file = file;
+    public void updateParentDir(File parentDir) {
+        this.file = new File(parentDir, file.getName());
     }
 
     /**
@@ -267,7 +269,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
     }
 
     @Override
-    public long writeTo(GatheringByteChannel destChannel, long offset, int length) throws IOException {
+    public long writeTo(TransferableChannel destChannel, long offset, int length) throws IOException {
         long newSize = Math.min(channel.size(), end) - start;
         int oldSize = sizeInBytes();
         if (newSize < oldSize)
@@ -277,14 +279,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
 
         long position = start + offset;
         int count = Math.min(length, oldSize);
-        final long bytesTransferred;
-        if (destChannel instanceof TransportLayer) {
-            TransportLayer tl = (TransportLayer) destChannel;
-            bytesTransferred = tl.transferFrom(channel, position, count);
-        } else {
-            bytesTransferred = channel.transferTo(position, count, destChannel);
-        }
-        return bytesTransferred;
+        return destChannel.transferFrom(channel, position, count);
     }
 
     /**

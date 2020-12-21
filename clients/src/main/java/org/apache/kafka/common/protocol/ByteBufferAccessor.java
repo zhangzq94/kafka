@@ -49,6 +49,11 @@ public class ByteBufferAccessor implements Readable, Writable {
     }
 
     @Override
+    public double readDouble() {
+        return ByteUtils.readDouble(buf);
+    }
+
+    @Override
     public void readArray(byte[] arr) {
         buf.get(arr);
     }
@@ -89,6 +94,11 @@ public class ByteBufferAccessor implements Readable, Writable {
     }
 
     @Override
+    public void writeDouble(double val) {
+        ByteUtils.writeDouble(val, buf);
+    }
+
+    @Override
     public void writeByteArray(byte[] arr) {
         buf.put(arr);
     }
@@ -100,6 +110,34 @@ public class ByteBufferAccessor implements Readable, Writable {
 
     @Override
     public void writeByteBuffer(ByteBuffer src) {
-        buf.put(src);
+        buf.put(src.duplicate());
+    }
+
+    @Override
+    public void writeVarint(int i) {
+        ByteUtils.writeVarint(i, buf);
+    }
+
+    @Override
+    public void writeVarlong(long i) {
+        ByteUtils.writeVarlong(i, buf);
+    }
+
+    @Override
+    public int readVarint() {
+        return ByteUtils.readVarint(buf);
+    }
+
+    @Override
+    public long readVarlong() {
+        return ByteUtils.readVarlong(buf);
+    }
+
+    public void flip() {
+        buf.flip();
+    }
+
+    public ByteBuffer buffer() {
+        return buf;
     }
 }

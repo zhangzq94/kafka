@@ -34,6 +34,7 @@ import org.junit.runners.Parameterized
 import org.junit.runners.Parameterized.Parameters
 
 import scala.collection._
+import scala.jdk.CollectionConverters._
 
 /**
  * This is an integration test that tests the fully integrated log cleaner
@@ -81,7 +82,7 @@ class LogCleanerParameterizedIntegrationTest(compressionCodec: String) extends A
     // force a checkpoint
     // and make sure its gone from checkpoint file
     cleaner.logs.remove(topicPartitions(0))
-    cleaner.updateCheckpoints(logDir)
+    cleaner.updateCheckpoints(logDir, partitionToRemove = Option(topicPartitions(0)))
     val checkpoints = new OffsetCheckpointFile(new File(logDir, cleaner.cleanerManager.offsetCheckpointFile)).read()
     // we expect partition 0 to be gone
     assertFalse(checkpoints.contains(topicPartitions(0)))
@@ -296,7 +297,6 @@ class LogCleanerParameterizedIntegrationTest(compressionCodec: String) extends A
   }
 
   private def readFromLog(log: Log): Iterable[(Int, String, Long)] = {
-    import JavaConverters._
     for (segment <- log.logSegments; deepLogEntry <- segment.log.records.asScala) yield {
       val key = TestUtils.readString(deepLogEntry.key).toInt
       val value = TestUtils.readString(deepLogEntry.value)

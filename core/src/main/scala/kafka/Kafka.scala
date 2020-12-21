@@ -20,12 +20,12 @@ package kafka
 import java.util.Properties
 
 import joptsimple.OptionParser
+import kafka.server.KafkaServerStartable
 import kafka.utils.Implicits._
-import kafka.server.{KafkaServer, KafkaServerStartable}
 import kafka.utils.{CommandLineUtils, Exit, Logging}
 import org.apache.kafka.common.utils.{Java, LoggingSignalHandler, OperatingSystem, Utils}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 object Kafka extends Logging {
 
@@ -41,7 +41,8 @@ object Kafka extends Logging {
     optionParser.accepts("version", "Print version information and exit.")
 
     if (args.length == 0 || args.contains("--help")) {
-      CommandLineUtils.printUsageAndDie(optionParser, "USAGE: java [options] %s server.properties [--override property=value]*".format(classOf[KafkaServer].getSimpleName()))
+      CommandLineUtils.printUsageAndDie(optionParser,
+        "USAGE: java [options] %s server.properties [--override property=value]*".format(this.getClass.getCanonicalName.split('$').head))
     }
 
     if (args.contains("--version")) {
@@ -77,9 +78,7 @@ object Kafka extends Logging {
       }
 
       // attach shutdown handler to catch terminating signals as well as normal termination
-      Runtime.getRuntime().addShutdownHook(new Thread("kafka-shutdown-hook") {
-        override def run(): Unit = kafkaServerStartable.shutdown()
-      })
+      Exit.addShutdownHook("kafka-shutdown-hook", kafkaServerStartable.shutdown())
 
       kafkaServerStartable.startup()
       kafkaServerStartable.awaitShutdown()

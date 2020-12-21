@@ -17,8 +17,8 @@ import java.time.Duration
 import java.util.Collections
 import java.util.concurrent.{ExecutionException, TimeUnit}
 
-import scala.collection.JavaConverters._
-import org.apache.kafka.clients.admin.{AdminClient, AdminClientConfig}
+import scala.jdk.CollectionConverters._
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{KafkaException, TopicPartition}
@@ -55,6 +55,11 @@ class SaslClientsWithInvalidCredentialsTest extends IntegrationTestHarness with 
     zkClient.makeSurePersistentPathExists(ConfigEntityChangeNotificationZNode.path)
     // Create broker credentials before starting brokers
     createScramCredentials(zkConnect, JaasTestUtils.KafkaScramAdmin, JaasTestUtils.KafkaScramAdminPassword)
+  }
+
+  override def createPrivilegedAdminClient() = {
+    createAdminClient(brokerList, securityProtocol, trustStoreFile, clientSaslProperties,
+      kafkaClientSaslMechanism, JaasTestUtils.KafkaScramAdmin, JaasTestUtils.KafkaScramAdminPassword)
   }
 
   @Before
@@ -132,13 +137,13 @@ class SaslClientsWithInvalidCredentialsTest extends IntegrationTestHarness with 
   def testKafkaAdminClientWithAuthenticationFailure(): Unit = {
     val props = TestUtils.adminClientSecurityConfigs(securityProtocol, trustStoreFile, clientSaslProperties)
     props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
-    val adminClient = AdminClient.create(props)
+    val adminClient = Admin.create(props)
 
     def describeTopic(): Unit = {
       try {
         val response = adminClient.describeTopics(Collections.singleton(topic)).all.get
         assertEquals(1, response.size)
-        response.asScala.foreach { case (topic, description) =>
+        response.forEach { (topic, description) =>
           assertEquals(numPartitions, description.partitions.size)
         }
       } catch {
@@ -161,10 +166,11 @@ class SaslClientsWithInvalidCredentialsTest extends IntegrationTestHarness with 
     val consumerGroupService: ConsumerGroupService = prepareConsumerGroupService
 
     val consumer = createConsumer()
-    consumer.subscribe(List(topic).asJava)
+    try {
+      consumer.subscribe(List(topic).asJava)
 
-    verifyAuthenticationException(consumerGroupService.listGroups)
-    consumerGroupService.close()
+      verifyAuthenticationException(consumerGroupService.listGroups())
+    } finally consumerGroupService.close()
   }
 
   @Test
@@ -173,19 +179,23 @@ class SaslClientsWithInvalidCredentialsTest extends IntegrationTestHarness with 
     val consumerGroupService: ConsumerGroupService = prepareConsumerGroupService
 
     val consumer = createConsumer()
-    consumer.subscribe(List(topic).asJava)
+    try {
+      consumer.subscribe(List(topic).asJava)
 
-    verifyWithRetry(consumer.poll(Duration.ofMillis(1000)))
-    assertEquals(1, consumerGroupService.listGroups.size)
-    consumerGroupService.close()
+      verifyWithRetry(consumer.poll(Duration.ofMillis(1000)))
+      assertEquals(1, consumerGroupService.listConsumerGroups().size)
+    }
+    finally consumerGroupService.close()
   }
 
   private def prepareConsumerGroupService = {
     val propsFile = TestUtils.tempFile()
     val propsStream = Files.newOutputStream(propsFile.toPath)
-    propsStream.write("security.protocol=SASL_PLAINTEXT\n".getBytes())
-    propsStream.write(s"sasl.mechanism=$kafkaClientSaslMechanism".getBytes())
-    propsStream.close()
+    try {
+      propsStream.write("security.protocol=SASL_PLAINTEXT\n".getBytes())
+      propsStream.write(s"sasl.mechanism=$kafkaClientSaslMechanism".getBytes())
+    }
+    finally propsStream.close()
 
     val cgcArgs = Array("--bootstrap-server", brokerList,
                         "--describe",
@@ -197,7 +207,7 @@ class SaslClientsWithInvalidCredentialsTest extends IntegrationTestHarness with 
   }
 
   private def createClientCredential(): Unit = {
-    createScramCredentials(zkConnect, JaasTestUtils.KafkaScramUser2, JaasTestUtils.KafkaScramPassword2)
+    createScramCredentialsViaPrivilegedAdminClient(JaasTestUtils.KafkaScramUser2, JaasTestUtils.KafkaScramPassword2)
   }
 
   private def sendOneRecord(producer: KafkaProducer[Array[Byte], Array[Byte]], maxWaitMs: Long = 15000): Unit = {

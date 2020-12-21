@@ -23,7 +23,7 @@ import java.util.Arrays
 import kafka.server._
 import kafka.utils.TestUtils
 import kafka.zk.ZooKeeperTestHarness
-import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
+import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.junit.{After, Before}
 
 import scala.collection.Seq
@@ -32,6 +32,7 @@ import java.util.Properties
 
 import org.apache.kafka.common.KafkaException
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.security.scram.ScramCredential
 import org.apache.kafka.common.utils.Time
 
 /**
@@ -42,7 +43,6 @@ abstract class KafkaServerTestHarness extends ZooKeeperTestHarness {
   var servers: Buffer[KafkaServer] = new ArrayBuffer
   var brokerList: String = null
   var alive: Array[Boolean] = null
-  val kafkaPrincipalType = KafkaPrincipal.USER_TYPE
 
   /**
    * Implementations must override this method to return a set of KafkaConfigs. This method will be invoked for every
@@ -160,4 +160,12 @@ abstract class KafkaServerTestHarness extends ZooKeeperTestHarness {
       alive(i) = true
     }
   }
+
+  def waitForUserScramCredentialToAppearOnAllBrokers(clientPrincipal: String, mechanismName: String): Unit = {
+    servers.foreach { server =>
+      val cache = server.credentialProvider.credentialCache.cache(mechanismName, classOf[ScramCredential])
+      TestUtils.waitUntilTrue(() => cache.get(clientPrincipal) != null, s"SCRAM credentials not created for $clientPrincipal")
+    }
+  }
+
 }

@@ -17,9 +17,11 @@
 
 package kafka.server
 
-import org.apache.kafka.common.TopicPartition
+import java.util.Collections
 
-import scala.collection.JavaConverters._
+import org.apache.kafka.common.{TopicPartition, Uuid}
+
+import scala.jdk.CollectionConverters._
 import kafka.api.LeaderAndIsr
 import org.apache.kafka.common.requests._
 import org.junit.Assert._
@@ -134,7 +136,7 @@ class LeaderElectionTest extends ZooKeeperTestHarness {
     val nodes = brokerAndEpochs.keys.map(_.node(listenerName))
 
     val controllerContext = new ControllerContext
-    controllerContext.setLiveBrokerAndEpochs(brokerAndEpochs)
+    controllerContext.setLiveBrokers(brokerAndEpochs)
     val metrics = new Metrics
     val controllerChannelManager = new ControllerChannelManager(controllerContext, controllerConfig, Time.SYSTEM,
       metrics, new StateChangeLogger(controllerId, inControllerContext = true, None))
@@ -155,7 +157,8 @@ class LeaderElectionTest extends ZooKeeperTestHarness {
       )
       val requestBuilder = new LeaderAndIsrRequest.Builder(
         ApiKeys.LEADER_AND_ISR.latestVersion, controllerId, staleControllerEpoch,
-        servers(brokerId2).kafkaController.brokerEpoch, partitionStates.asJava, nodes.toSet.asJava)
+        servers(brokerId2).kafkaController.brokerEpoch, partitionStates.asJava,
+        Collections.singletonMap(topic, Uuid.randomUuid()), nodes.toSet.asJava)
 
       controllerChannelManager.sendRequest(brokerId2, requestBuilder, staleControllerEpochCallback)
       TestUtils.waitUntilTrue(() => staleControllerEpochDetected, "Controller epoch should be stale")

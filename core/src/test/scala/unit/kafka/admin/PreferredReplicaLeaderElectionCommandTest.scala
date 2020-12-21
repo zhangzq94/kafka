@@ -28,7 +28,7 @@ import kafka.security.authorizer.AclAuthorizer
 import kafka.server.{KafkaConfig, KafkaServer}
 import kafka.utils.{Logging, TestUtils}
 import kafka.zk.ZooKeeperTestHarness
-import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.errors.ClusterAuthorizationException
 import org.apache.kafka.common.errors.PreferredLeaderNotAvailableException
@@ -41,7 +41,7 @@ import org.apache.kafka.test
 import org.junit.Assert._
 import org.junit.{After, Test}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness with Logging {
   var servers: Seq[KafkaServer] = Seq()
@@ -54,7 +54,6 @@ class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness wit
 
   private def createTestTopicAndCluster(topicPartition: Map[TopicPartition, List[Int]],
                                         authorizer: Option[String] = None): Unit = {
-
     val brokerConfigs = TestUtils.createBrokerConfigs(3, zkConnect, false)
     brokerConfigs.foreach(p => p.setProperty("auto.leader.rebalance.enable", "false"))
     authorizer match {
@@ -71,7 +70,7 @@ class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness wit
     servers = brokerConfigs.map(b => TestUtils.createServer(KafkaConfig.fromProps(b)))
     // create the topic
     partitionsAndAssignments.foreach { case (tp, assignment) =>
-      zkClient.createTopicAssignment(tp.topic,
+      zkClient.createTopicAssignment(tp.topic, Uuid.randomUuid(),
       Map(tp -> assignment))
     }
     // wait until replica log is created on every broker
@@ -79,7 +78,7 @@ class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness wit
       () =>
         servers.forall { server =>
           partitionsAndAssignments.forall { partitionAndAssignment =>
-            server.getLogManager().getLog(partitionAndAssignment._1).isDefined
+            server.getLogManager.getLog(partitionAndAssignment._1).isDefined
           }
         },
       "Replicas for topic test not created"
@@ -333,11 +332,11 @@ class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness wit
       PreferredReplicaLeaderElectionCommand.run(Array(
         "--bootstrap-server", bootstrapServer(),
         "--path-to-json-file", jsonFile.getAbsolutePath))
-      fail();
+      fail()
     } catch {
       case e: AdminCommandFailedException =>
         assertEquals("Not authorized to perform leader election", e.getMessage)
-        assertTrue(e.getCause().isInstanceOf[ClusterAuthorizationException])
+        assertTrue(e.getCause.isInstanceOf[ClusterAuthorizationException])
         // Check we still have the same leader
         assertEquals(leader, awaitLeader(testPartition))
     } finally {
@@ -367,7 +366,7 @@ class PreferredReplicaLeaderElectionCommandTest extends ZooKeeperTestHarness wit
     val serverConfigs = TestUtils.createBrokerConfigs(3, zkConnect, false, rackInfo = brokerRack).map(KafkaConfig.fromProps)
     // create the topic
     adminZkClient.createTopicWithAssignment(topic, config = new Properties, expectedReplicaAssignment)
-    servers = serverConfigs.reverseMap(s => TestUtils.createServer(s))
+    servers = serverConfigs.reverse.map(s => TestUtils.createServer(s))
     // broker 2 should be the leader since it was started first
     val currentLeader = TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, partition, oldLeaderOpt = None)
     // trigger preferred replica election

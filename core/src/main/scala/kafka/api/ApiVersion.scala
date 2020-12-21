@@ -19,7 +19,11 @@ package kafka.api
 
 import org.apache.kafka.common.config.ConfigDef.Validator
 import org.apache.kafka.common.config.ConfigException
-import org.apache.kafka.common.record.RecordVersion
+import org.apache.kafka.common.feature.{Features, FinalizedVersionRange, SupportedVersionRange}
+import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.common.record.{RecordBatch, RecordVersion}
+import org.apache.kafka.common.requests.{AbstractResponse, ApiVersionsResponse}
+import org.apache.kafka.common.requests.ApiVersionsResponse.DEFAULT_API_VERSIONS_RESPONSE
 
 /**
  * This class contains the different Kafka versions.
@@ -94,7 +98,21 @@ object ApiVersion {
     // Add adding_replicas and removing_replicas fields to LeaderAndIsrRequest
     KAFKA_2_4_IV0,
     // Flexible version support in inter-broker APIs
-    KAFKA_2_4_IV1
+    KAFKA_2_4_IV1,
+    // No new APIs, equivalent to 2.4-IV1
+    KAFKA_2_5_IV0,
+    // Introduced StopReplicaRequest V3 containing the leader epoch for each partition (KIP-570)
+    KAFKA_2_6_IV0,
+    // Introduced feature versioning support (KIP-584)
+    KAFKA_2_7_IV0,
+    // Bup Fetch protocol for Raft protocol (KIP-595)
+    KAFKA_2_7_IV1,
+    // Introduced AlterIsr (KIP-497)
+    KAFKA_2_7_IV2,
+    // Flexible versioning on ListOffsets, WriteTxnMarkers and OffsetsForLeaderEpoch.
+    KAFKA_2_8_IV0,
+    // Introduced topic IDs to LeaderAndIsr and UpdateMetadata requests/responses (KIP-516)
+    KAFKA_2_8_IV1
   )
 
   // Map keys are the union of the short and full versions
@@ -112,7 +130,9 @@ object ApiVersion {
     versionMap.getOrElse(key, throw new IllegalArgumentException(s"Version `$versionString` is not a valid version"))
   }
 
-  def latestVersion: ApiVersion = allVersions.last
+  val latestVersion: ApiVersion = allVersions.last
+
+  def isTruncationOnFetchSupported(version: ApiVersion): Boolean = version >= KAFKA_2_7_IV1
 
   /**
    * Return the minimum `ApiVersion` that supports `RecordVersion`.
@@ -125,6 +145,47 @@ object ApiVersion {
       case _ => throw new IllegalArgumentException(s"Invalid message format version $recordVersion")
     }
   }
+
+  def apiVersionsResponse(throttleTimeMs: Int,
+                          maxMagic: Byte,
+                          latestSupportedFeatures: Features[SupportedVersionRange]): ApiVersionsResponse = {
+    apiVersionsResponse(
+      throttleTimeMs,
+      maxMagic,
+      latestSupportedFeatures,
+      Features.emptyFinalizedFeatures,
+      ApiVersionsResponse.UNKNOWN_FINALIZED_FEATURES_EPOCH
+    )
+  }
+
+  def apiVersionsResponse(throttleTimeMs: Int,
+                          maxMagic: Byte,
+                          latestSupportedFeatures: Features[SupportedVersionRange],
+                          finalizedFeatures: Features[FinalizedVersionRange],
+                          finalizedFeaturesEpoch: Long): ApiVersionsResponse = {
+    val apiKeys = ApiVersionsResponse.defaultApiKeys(maxMagic)
+    if (maxMagic == RecordBatch.CURRENT_MAGIC_VALUE &&
+      throttleTimeMs == AbstractResponse.DEFAULT_THROTTLE_TIME)
+      return new ApiVersionsResponse(
+        ApiVersionsResponse.createApiVersionsResponseData(
+          DEFAULT_API_VERSIONS_RESPONSE.throttleTimeMs,
+          Errors.forCode(DEFAULT_API_VERSIONS_RESPONSE.data.errorCode),
+          apiKeys,
+          latestSupportedFeatures,
+          finalizedFeatures,
+          finalizedFeaturesEpoch)
+      )
+
+    new ApiVersionsResponse(
+      ApiVersionsResponse.createApiVersionsResponseData(
+        throttleTimeMs,
+        Errors.NONE,
+        apiKeys,
+        latestSupportedFeatures,
+        finalizedFeatures,
+        finalizedFeaturesEpoch)
+    )
+  }
 }
 
 sealed trait ApiVersion extends Ordered[ApiVersion] {
@@ -132,6 +193,8 @@ sealed trait ApiVersion extends Ordered[ApiVersion] {
   def shortVersion: String
   def recordVersion: RecordVersion
   def id: Int
+
+  def isAlterIsrSupported: Boolean = this >= KAFKA_2_7_IV2
 
   override def compare(that: ApiVersion): Int =
     ApiVersion.orderingByVersion.compare(this, that)
@@ -332,6 +395,55 @@ case object KAFKA_2_4_IV1 extends DefaultApiVersion {
   val subVersion = "IV1"
   val recordVersion = RecordVersion.V2
   val id: Int = 25
+}
+
+case object KAFKA_2_5_IV0 extends DefaultApiVersion {
+  val shortVersion: String = "2.5"
+  val subVersion = "IV0"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 26
+}
+
+case object KAFKA_2_6_IV0 extends DefaultApiVersion {
+  val shortVersion: String = "2.6"
+  val subVersion = "IV0"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 27
+}
+
+case object KAFKA_2_7_IV0 extends DefaultApiVersion {
+  val shortVersion: String = "2.7"
+  val subVersion = "IV0"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 28
+}
+
+case object KAFKA_2_7_IV1 extends DefaultApiVersion {
+  val shortVersion: String = "2.7"
+  val subVersion = "IV1"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 29
+}
+
+case object KAFKA_2_7_IV2 extends DefaultApiVersion {
+  val shortVersion: String = "2.7"
+  val subVersion = "IV2"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 30
+}
+
+case object KAFKA_2_8_IV0 extends DefaultApiVersion {
+  val shortVersion: String = "2.8"
+  val subVersion = "IV0"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 31
+}
+
+case object KAFKA_2_8_IV1 extends DefaultApiVersion {
+  val shortVersion: String = "2.8"
+  val subVersion = "IV1"
+  val recordVersion = RecordVersion.V2
+  val id: Int = 32
 }
 
 object ApiVersionValidator extends Validator {

@@ -24,7 +24,7 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.RecordBatch
 import org.apache.kafka.common.requests.{RequestHeader, TransactionResult, WriteTxnMarkersRequest, WriteTxnMarkersResponse}
-import org.easymock.{EasyMock, IAnswer}
+import org.easymock.EasyMock
 import org.junit.Assert._
 import org.junit.Test
 
@@ -177,8 +177,8 @@ class TransactionMarkerRequestCompletionHandlerTest {
   }
 
   @Test
-  def shouldRetryPartitionWhenNotLeaderForPartitionError(): Unit = {
-    verifyRetriesPartitionOnError(Errors.NOT_LEADER_FOR_PARTITION)
+  def shouldRetryPartitionWhenNotLeaderOrFollowerError(): Unit = {
+    verifyRetriesPartitionOnError(Errors.NOT_LEADER_OR_FOLLOWER)
   }
 
   @Test
@@ -189,6 +189,11 @@ class TransactionMarkerRequestCompletionHandlerTest {
   @Test
   def shouldRetryPartitionWhenNotEnoughReplicasAfterAppendError(): Unit = {
     verifyRetriesPartitionOnError(Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND)
+  }
+
+  @Test
+  def shouldRetryPartitionWhenKafkaStorageError(): Unit = {
+    verifyRetriesPartitionOnError(Errors.KAFKA_STORAGE_ERROR)
   }
 
   @Test
@@ -228,12 +233,8 @@ class TransactionMarkerRequestCompletionHandlerTest {
   private def verifyCompleteDelayedOperationOnError(error: Errors): Unit = {
 
     var completed = false
-    EasyMock.expect(markerChannelManager.completeSendMarkersForTxnId(transactionalId))
-      .andAnswer(new IAnswer[Unit] {
-        override def answer(): Unit = {
-          completed = true
-        }
-      })
+    EasyMock.expect(markerChannelManager.maybeWriteTxnCompletion(transactionalId))
+      .andAnswer(() => completed = true)
       .once()
     EasyMock.replay(markerChannelManager)
 
@@ -249,11 +250,7 @@ class TransactionMarkerRequestCompletionHandlerTest {
 
     var removed = false
     EasyMock.expect(markerChannelManager.removeMarkersForTxnId(transactionalId))
-      .andAnswer(new IAnswer[Unit] {
-        override def answer(): Unit = {
-          removed = true
-        }
-      })
+      .andAnswer(() => removed = true)
       .once()
     EasyMock.replay(markerChannelManager)
 

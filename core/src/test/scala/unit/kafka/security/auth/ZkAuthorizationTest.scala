@@ -22,7 +22,7 @@ import java.nio.charset.StandardCharsets
 import kafka.admin.ZkSecurityMigrator
 import kafka.utils.{Logging, TestUtils}
 import kafka.zk._
-import org.apache.kafka.common.{KafkaException, TopicPartition}
+import org.apache.kafka.common.{KafkaException, TopicPartition, Uuid}
 import org.apache.kafka.common.security.JaasUtils
 import org.apache.zookeeper.data.{ACL, Stat}
 import org.junit.Assert._
@@ -37,7 +37,7 @@ import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.Time
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.collection.Seq
 
 class ZkAuthorizationTest extends ZooKeeperTestHarness with Logging {
@@ -66,14 +66,14 @@ class ZkAuthorizationTest extends ZooKeeperTestHarness with Logging {
    */
   @Test
   def testIsZkSecurityEnabled(): Unit = {
-    assertTrue(JaasUtils.isZkSecurityEnabled())
+    assertTrue(JaasUtils.isZkSaslEnabled())
     Configuration.setConfiguration(null)
     System.clearProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM)
-    assertFalse(JaasUtils.isZkSecurityEnabled())
+    assertFalse(JaasUtils.isZkSaslEnabled())
     try {
       Configuration.setConfiguration(null)
       System.setProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM, "no-such-file-exists.conf")
-      JaasUtils.isZkSecurityEnabled()
+      JaasUtils.isZkSaslEnabled()
       fail("Should have thrown an exception")
     } catch {
       case _: KafkaException => // Expected
@@ -110,6 +110,7 @@ class ZkAuthorizationTest extends ZooKeeperTestHarness with Logging {
 
     // Test that creates persistent nodes
     val topic1 = "topic1"
+    val topicId = Uuid.randomUuid()
     val assignment = Map(
       new TopicPartition(topic1, 0) -> Seq(0, 1),
       new TopicPartition(topic1, 1) -> Seq(0, 1),
@@ -117,7 +118,7 @@ class ZkAuthorizationTest extends ZooKeeperTestHarness with Logging {
     )
 
     // create a topic assignment
-    zkClient.createTopicAssignment(topic1, assignment)
+    zkClient.createTopicAssignment(topic1, topicId, assignment)
     verify(TopicZNode.path(topic1))
 
     // Test that can create: createSequentialPersistentPath
@@ -131,7 +132,8 @@ class ZkAuthorizationTest extends ZooKeeperTestHarness with Logging {
 
     // Test that can update persistent nodes
     val updatedAssignment = assignment - new TopicPartition(topic1, 2)
-    zkClient.setTopicAssignment(topic1, updatedAssignment.mapValues { case (v) => ReplicaAssignment(v, List(), List()) }.toMap)
+    zkClient.setTopicAssignment(topic1, topicId,
+      updatedAssignment.map { case (k, v) => k -> ReplicaAssignment(v, List(), List()) })
     assertEquals(updatedAssignment.size, zkClient.getTopicPartitionCount(topic1).get)
   }
 

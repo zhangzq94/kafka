@@ -16,7 +16,12 @@
  */
 package org.apache.kafka.common.utils;
 
+import java.nio.BufferUnderflowException;
+import java.util.EnumSet;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.config.ConfigException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,11 +63,18 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 public final class Utils {
 
@@ -277,6 +289,37 @@ public final class Utils {
     }
 
     /**
+     * Starting from the current position, read an integer indicating the size of the byte array to read,
+     * then read the array. Consumes the buffer: upon returning, the buffer's position is after the array
+     * that is returned.
+     * @param buffer The buffer to read a size-prefixed array from
+     * @return The array
+     */
+    public static byte[] getNullableSizePrefixedArray(final ByteBuffer buffer) {
+        final int size = buffer.getInt();
+        return getNullableArray(buffer, size);
+    }
+
+    /**
+     * Read a byte array of the given size. Consumes the buffer: upon returning, the buffer's position
+     * is after the array that is returned.
+     * @param buffer The buffer to read a size-prefixed array from
+     * @param size The number of bytes to read out of the buffer
+     * @return The array
+     */
+    public static byte[] getNullableArray(final ByteBuffer buffer, final int size) {
+        if (size > buffer.remaining()) {
+            // preemptively throw this when the read is doomed to fail, so we don't have to allocate the array.
+            throw new BufferUnderflowException();
+        }
+        final byte[] oldBytes = size == -1 ? null : new byte[size];
+        if (oldBytes != null) {
+            buffer.get(oldBytes);
+        }
+        return oldBytes;
+    }
+
+    /**
      * Returns a copy of src byte array
      * @param src The byte array to copy
      * @return The copy
@@ -333,6 +376,18 @@ public final class Utils {
      */
     public static <T> Class<? extends T> loadClass(String klass, Class<T> base) throws ClassNotFoundException {
         return Class.forName(klass, true, Utils.getContextOrKafkaClassLoader()).asSubclass(base);
+    }
+
+    /**
+     * Cast {@code klass} to {@code base} and instantiate it.
+     * @param klass The class to instantiate
+     * @param base A know baseclass of klass.
+     * @param <T> the type of the base class
+     * @throws ClassCastException If {@code klass} is not a subclass of {@code base}.
+     * @return the new instance.
+     */
+    public static <T> T newInstance(Class<?> klass, Class<T> base) {
+        return Utils.newInstance(klass.asSubclass(base));
     }
 
     /**
@@ -493,15 +548,15 @@ public final class Utils {
     }
 
     /**
-     * Create a string representation of a list joined by the given separator
-     * @param list The list of items
+     * Create a string representation of a collection joined by the given separator
+     * @param collection The list of items
      * @param separator The separator
      * @return The string representation.
      */
-    public static <T> String join(Collection<T> list, String separator) {
-        Objects.requireNonNull(list);
+    public static <T> String join(Collection<T> collection, String separator) {
+        Objects.requireNonNull(collection);
         StringBuilder sb = new StringBuilder();
-        Iterator<T> iter = list.iterator();
+        Iterator<T> iter = collection.iterator();
         while (iter.hasNext()) {
             sb.append(iter.next());
             if (iter.hasNext())
@@ -553,8 +608,19 @@ public final class Utils {
     /**
      * Read a properties file from the given path
      * @param filename The path of the file to read
+     * @return the loaded properties
      */
     public static Properties loadProps(String filename) throws IOException {
+        return loadProps(filename, null);
+    }
+
+    /**
+     * Read a properties file from the given path
+     * @param filename The path of the file to read
+     * @param onlyIncludeKeys When non-null, only return values associated with these keys and ignore all others
+     * @return the loaded properties
+     */
+    public static Properties loadProps(String filename, List<String> onlyIncludeKeys) throws IOException {
         Properties props = new Properties();
 
         if (filename != null) {
@@ -565,7 +631,15 @@ public final class Utils {
             System.out.println("Did not load any properties since the property file is not specified");
         }
 
-        return props;
+        if (onlyIncludeKeys == null || onlyIncludeKeys.isEmpty())
+            return props;
+        Properties requestedProps = new Properties();
+        onlyIncludeKeys.forEach(key -> {
+            String value = props.getProperty(key);
+            if (value != null)
+                requestedProps.setProperty(key, value);
+        });
+        return requestedProps;
     }
 
     /**
@@ -641,7 +715,7 @@ public final class Utils {
         return existingBuffer;
     }
 
-    /*
+    /**
      * Creates a set
      * @param elems the elements
      * @param <T> the type of element
@@ -650,6 +724,20 @@ public final class Utils {
     @SafeVarargs
     public static <T> Set<T> mkSet(T... elems) {
         Set<T> result = new HashSet<>((int) (elems.length / 0.75) + 1);
+        for (T elem : elems)
+            result.add(elem);
+        return result;
+    }
+
+    /**
+     * Creates a sorted set
+     * @param elems the elements
+     * @param <T> the type of element, must be comparable
+     * @return SortedSet
+     */
+    @SafeVarargs
+    public static <T extends Comparable<T>> SortedSet<T> mkSortedSet(T... elems) {
+        SortedSet<T> result = new TreeSet<>();
         for (T elem : elems)
             result.add(elem);
         return result;
@@ -715,31 +803,72 @@ public final class Utils {
     }
 
     /**
+     * Creates a {@link Properties} from a map
+     *
+     * @param properties A map of properties to add
+     * @return The properties object
+     */
+    public static Properties mkObjectProperties(final Map<String, Object> properties) {
+        final Properties result = new Properties();
+        for (final Map.Entry<String, Object> entry : properties.entrySet()) {
+            result.put(entry.getKey(), entry.getValue());
+        }
+        return result;
+    }
+
+    /**
      * Recursively delete the given file/directory and any subfiles (if any exist)
      *
-     * @param file The root file at which to begin deleting
+     * @param rootFile The root file at which to begin deleting
      */
-    public static void delete(final File file) throws IOException {
-        if (file == null)
+    public static void delete(final File rootFile) throws IOException {
+        delete(rootFile, Collections.emptyList());
+    }
+
+    /**
+     * Recursively delete the subfiles (if any exist) of the passed in root file that are not included
+     * in the list to keep
+     *
+     * @param rootFile The root file at which to begin deleting
+     * @param filesToKeep The subfiles to keep (note that if a subfile is to be kept, so are all its parent
+     *                    files in its pat)h; if empty we would also delete the root file
+     */
+    public static void delete(final File rootFile, final List<File> filesToKeep) throws IOException {
+        if (rootFile == null)
             return;
-        Files.walkFileTree(file.toPath(), new SimpleFileVisitor<Path>() {
+        Files.walkFileTree(rootFile.toPath(), new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult visitFileFailed(Path path, IOException exc) throws IOException {
                 // If the root path did not exist, ignore the error; otherwise throw it.
-                if (exc instanceof NoSuchFileException && path.toFile().equals(file))
+                if (exc instanceof NoSuchFileException && path.toFile().equals(rootFile))
                     return FileVisitResult.TERMINATE;
                 throw exc;
             }
 
             @Override
             public FileVisitResult visitFile(Path path, BasicFileAttributes attrs) throws IOException {
-                Files.delete(path);
+                if (!filesToKeep.contains(path.toFile())) {
+                    Files.delete(path);
+                }
                 return FileVisitResult.CONTINUE;
             }
 
             @Override
             public FileVisitResult postVisitDirectory(Path path, IOException exc) throws IOException {
-                Files.delete(path);
+                // KAFKA-8999: if there's an exception thrown previously already, we should throw it
+                if (exc != null) {
+                    throw exc;
+                }
+
+                if (rootFile.toPath().equals(path)) {
+                    // only delete the parent directory if there's nothing to keep
+                    if (filesToKeep.isEmpty()) {
+                        Files.delete(path);
+                    }
+                } else if (!filesToKeep.contains(path.toFile())) {
+                    Files.delete(path);
+                }
+
                 return FileVisitResult.CONTINUE;
             }
         });
@@ -819,6 +948,18 @@ public final class Utils {
     }
 
     /**
+     * An {@link AutoCloseable} interface without a throws clause in the signature
+     *
+     * This is used with lambda expressions in try-with-resources clauses
+     * to avoid casting un-checked exceptions to checked exceptions unnecessarily.
+     */
+    @FunctionalInterface
+    public interface UncheckedCloseable extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /**
      * Closes {@code closeable} and if an exception is thrown, it is logged at the WARN level.
      */
     public static void closeQuietly(AutoCloseable closeable, String name) {
@@ -840,6 +981,16 @@ public final class Utils {
                 log.error("Failed to close {} with type {}", name, closeable.getClass().getName(), t);
             }
         }
+    }
+
+    /**
+     * close all closable objects even if one of them throws exception.
+     * @param firstException keeps the first exception
+     * @param name message of closing those objects
+     * @param closeables closable objects
+     */
+    public static void closeAllQuietly(AtomicReference<Throwable> firstException, String name, AutoCloseable... closeables) {
+        for (AutoCloseable closeable : closeables) closeQuietly(closeable, name, firstException);
     }
 
     /**
@@ -979,6 +1130,10 @@ public final class Utils {
         }
     }
 
+    public static <T> List<T> toList(Iterable<T> iterable) {
+        return toList(iterable.iterator());
+    }
+
     public static <T> List<T> toList(Iterator<T> iterator) {
         List<T> res = new ArrayList<>();
         while (iterator.hasNext())
@@ -1030,5 +1185,143 @@ public final class Utils {
                 entry -> valueMapper.apply(entry.getValue())
             )
         );
+    }
+
+    /**
+     * A Collector that offers two kinds of convenience:
+     * 1. You can specify the concrete type of the returned Map
+     * 2. You can turn a stream of Entries directly into a Map without having to mess with a key function
+     *    and a value function. In particular, this is handy if all you need to do is apply a filter to a Map's entries.
+     *
+     *
+     * One thing to be wary of: These types are too "distant" for IDE type checkers to warn you if you
+     * try to do something like build a TreeMap of non-Comparable elements. You'd get a runtime exception for that.
+     *
+     * @param mapSupplier The constructor for your concrete map type.
+     * @param <K> The Map key type
+     * @param <V> The Map value type
+     * @param <M> The type of the Map itself.
+     * @return new Collector<Map.Entry<K, V>, M, M>
+     */
+    public static <K, V, M extends Map<K, V>> Collector<Map.Entry<K, V>, M, M> entriesToMap(final Supplier<M> mapSupplier) {
+        return new Collector<Map.Entry<K, V>, M, M>() {
+            @Override
+            public Supplier<M> supplier() {
+                return mapSupplier;
+            }
+
+            @Override
+            public BiConsumer<M, Map.Entry<K, V>> accumulator() {
+                return (map, entry) -> map.put(entry.getKey(), entry.getValue());
+            }
+
+            @Override
+            public BinaryOperator<M> combiner() {
+                return (map, map2) -> {
+                    map.putAll(map2);
+                    return map;
+                };
+            }
+
+            @Override
+            public Function<M, M> finisher() {
+                return map -> map;
+            }
+
+            @Override
+            public Set<Characteristics> characteristics() {
+                return EnumSet.of(Characteristics.UNORDERED, Characteristics.IDENTITY_FINISH);
+            }
+        };
+    }
+
+    @SafeVarargs
+    public static <E> Set<E> union(final Supplier<Set<E>> constructor, final Set<E>... set) {
+        final Set<E> result = constructor.get();
+        for (final Set<E> s : set) {
+            result.addAll(s);
+        }
+        return result;
+    }
+
+    @SafeVarargs
+    public static <E> Set<E> intersection(final Supplier<Set<E>> constructor, final Set<E> first, final Set<E>... set) {
+        final Set<E> result = constructor.get();
+        result.addAll(first);
+        for (final Set<E> s : set) {
+            result.retainAll(s);
+        }
+        return result;
+    }
+
+    public static <E> Set<E> diff(final Supplier<Set<E>> constructor, final Set<E> left, final Set<E> right) {
+        final Set<E> result = constructor.get();
+        result.addAll(left);
+        result.removeAll(right);
+        return result;
+    }
+
+    /**
+     * Convert a properties to map. All keys in properties must be string type. Otherwise, a ConfigException is thrown.
+     * @param properties to be converted
+     * @return a map including all elements in properties
+     */
+    public static Map<String, Object> propsToMap(Properties properties) {
+        Map<String, Object> map = new HashMap<>(properties.size());
+        for (Map.Entry<Object, Object> entry : properties.entrySet()) {
+            if (entry.getKey() instanceof String) {
+                String k = (String) entry.getKey();
+                map.put(k, properties.get(k));
+            } else {
+                throw new ConfigException(entry.getKey().toString(), entry.getValue(), "Key must be a string.");
+            }
+        }
+        return map;
+    }
+
+    /**
+     * Convert timestamp to an epoch value
+     * @param timestamp the timestamp to be converted, the accepted formats are:
+     *                 (1) yyyy-MM-dd'T'HH:mm:ss.SSS, ex: 2020-11-10T16:51:38.198
+     *                 (2) yyyy-MM-dd'T'HH:mm:ss.SSSZ, ex: 2020-11-10T16:51:38.198+0800
+     *                 (3) yyyy-MM-dd'T'HH:mm:ss.SSSX, ex: 2020-11-10T16:51:38.198+08
+     *                 (4) yyyy-MM-dd'T'HH:mm:ss.SSSXX, ex: 2020-11-10T16:51:38.198+0800
+     *                 (5) yyyy-MM-dd'T'HH:mm:ss.SSSXXX, ex: 2020-11-10T16:51:38.198+08:00
+     *
+     * @return epoch value of a given timestamp (i.e. the number of milliseconds since January 1, 1970, 00:00:00 GMT)
+     * @throws ParseException for timestamp that doesn't follow ISO8601 format or the format is not expected
+     */
+    public static long getDateTime(String timestamp) throws ParseException, IllegalArgumentException {
+        if (timestamp == null) {
+            throw new IllegalArgumentException("Error parsing timestamp with null value");
+        }
+
+        final String[] timestampParts = timestamp.split("T");
+        if (timestampParts.length < 2) {
+            throw new ParseException("Error parsing timestamp. It does not contain a 'T' according to ISO8601 format", timestamp.length());
+        }
+
+        final String secondPart = timestampParts[1];
+        if (!(secondPart.contains("+") || secondPart.contains("-") || secondPart.contains("Z"))) {
+            timestamp = timestamp + "Z";
+        }
+
+        SimpleDateFormat simpleDateFormat = new SimpleDateFormat();
+        // strictly parsing the date/time format
+        simpleDateFormat.setLenient(false);
+        try {
+            simpleDateFormat.applyPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX");
+            final Date date = simpleDateFormat.parse(timestamp);
+            return date.getTime();
+        } catch (final ParseException e) {
+            simpleDateFormat.applyPattern("yyyy-MM-dd'T'HH:mm:ss.SSSX");
+            final Date date = simpleDateFormat.parse(timestamp);
+            return date.getTime();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <S> Iterator<S> covariantCast(Iterator<? extends S> iterator) {
+        return (Iterator<S>) iterator;
     }
 }

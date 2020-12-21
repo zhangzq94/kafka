@@ -17,8 +17,8 @@ import java.util.{Locale, Properties}
 import kafka.log.LogConfig
 import kafka.server.{KafkaConfig, KafkaServer}
 import kafka.utils.{JaasTestUtils, TestUtils}
-import com.yammer.metrics.Metrics
 import com.yammer.metrics.core.{Gauge, Histogram, Meter}
+import kafka.metrics.KafkaYammerMetrics
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
@@ -26,11 +26,12 @@ import org.apache.kafka.common.config.SaslConfigs
 import org.apache.kafka.common.errors.InvalidTopicException
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.security.auth.SecurityProtocol
+import org.apache.kafka.common.security.authenticator.TestJaasConfig
 import org.junit.{After, Before, Test}
 import org.junit.Assert._
 import org.scalatest.Assertions.fail
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 class MetricsTest extends IntegrationTestHarness with SaslSetup {
 
@@ -113,8 +114,8 @@ class MetricsTest extends IntegrationTestHarness with SaslSetup {
   // Create a producer that fails authentication to verify authentication failure metrics
   private def generateAuthenticationFailure(tp: TopicPartition): Unit = {
     val saslProps = new Properties()
-     // Temporary limit to reduce blocking before KIP-152 client-side changes are merged
-    saslProps.put(SaslConfigs.SASL_MECHANISM, "SCRAM-SHA-256")
+    saslProps.put(SaslConfigs.SASL_MECHANISM, kafkaClientSaslMechanism)
+    saslProps.put(SaslConfigs.SASL_JAAS_CONFIG, TestJaasConfig.jaasConfigProperty(kafkaClientSaslMechanism, "badUser", "badPass"))
     // Use acks=0 to verify error metric when connection is closed without a response
     val producer = TestUtils.createProducer(brokerList,
       acks = 0,
@@ -222,7 +223,7 @@ class MetricsTest extends IntegrationTestHarness with SaslSetup {
 
   private def verifyBrokerErrorMetrics(server: KafkaServer): Unit = {
 
-    def errorMetricCount = Metrics.defaultRegistry.allMetrics.keySet.asScala.filter(_.getName == "ErrorsPerSec").size
+    def errorMetricCount = KafkaYammerMetrics.defaultRegistry.allMetrics.keySet.asScala.filter(_.getName == "ErrorsPerSec").size
 
     val startErrorMetricCount = errorMetricCount
     val errorMetricPrefix = "kafka.network:type=RequestMetrics,name=ErrorsPerSec"
@@ -271,7 +272,7 @@ class MetricsTest extends IntegrationTestHarness with SaslSetup {
   }
 
   private def yammerMetricValue(name: String): Any = {
-    val allMetrics = Metrics.defaultRegistry.allMetrics.asScala
+    val allMetrics = KafkaYammerMetrics.defaultRegistry.allMetrics.asScala
     val (_, metric) = allMetrics.find { case (n, _) => n.getMBeanName.endsWith(name) }
       .getOrElse(fail(s"Unable to find broker metric $name: allMetrics: ${allMetrics.keySet.map(_.getMBeanName)}"))
     metric match {
@@ -283,7 +284,7 @@ class MetricsTest extends IntegrationTestHarness with SaslSetup {
   }
 
   private def yammerHistogram(name: String): Histogram = {
-    val allMetrics = Metrics.defaultRegistry.allMetrics.asScala
+    val allMetrics = KafkaYammerMetrics.defaultRegistry.allMetrics.asScala
     val (_, metric) = allMetrics.find { case (n, _) => n.getMBeanName.endsWith(name) }
       .getOrElse(fail(s"Unable to find broker metric $name: allMetrics: ${allMetrics.keySet.map(_.getMBeanName)}"))
     metric match {
@@ -299,7 +300,7 @@ class MetricsTest extends IntegrationTestHarness with SaslSetup {
   }
 
   private def verifyNoRequestMetrics(errorMessage: String): Unit = {
-    val metrics = Metrics.defaultRegistry.allMetrics.asScala.filter { case (n, _) =>
+    val metrics = KafkaYammerMetrics.defaultRegistry.allMetrics.asScala.filter { case (n, _) =>
       n.getMBeanName.startsWith("kafka.network:type=RequestMetrics")
     }
     assertTrue(s"$errorMessage: ${metrics.keys}", metrics.isEmpty)

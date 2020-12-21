@@ -20,6 +20,9 @@ package kafka.common
 import org.apache.kafka.common.errors.ApiException
 import org.apache.kafka.common.requests.ProduceResponse.RecordError
 
+import scala.collection.Seq
+
 class RecordValidationException(val invalidException: ApiException,
-                                val recordErrors: List[RecordError]) extends RuntimeException {
+                                val recordErrors: Seq[RecordError])
+  extends RuntimeException(invalidException) {
 }

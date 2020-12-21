@@ -20,15 +20,15 @@ package org.apache.kafka.streams.scala.kstream
 
 import java.time.Duration
 
-import org.apache.kafka.streams.kstream.{SessionWindows, TimeWindows, Windowed}
+import org.apache.kafka.streams.kstream.{SessionWindows, Suppressed => JSuppressed, TimeWindows, Windowed}
+import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.scala.ImplicitConversions._
-import org.apache.kafka.streams.scala.Serdes._
-import org.apache.kafka.streams.scala.kstream.Suppressed.BufferConfig
+import org.apache.kafka.streams.scala.serialization.Serdes._
 import org.apache.kafka.streams.scala.utils.TestDriver
 import org.apache.kafka.streams.scala.{ByteArrayKeyValueStore, StreamsBuilder}
 import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FlatSpec, Matchers}
+import org.scalatestplus.junit.JUnitRunner
 
 @RunWith(classOf[JUnitRunner])
 class KTableTest extends FlatSpec with Matchers with TestDriver {
@@ -39,29 +39,27 @@ class KTableTest extends FlatSpec with Matchers with TestDriver {
     val sinkTopic = "sink"
 
     val table = builder.stream[String, String](sourceTopic).groupBy((key, _) => key).count()
-    table.filter((_, value) => value > 1).toStream.to(sinkTopic)
+    table.filter((key, value) => key.equals("a") && value == 1).toStream.to(sinkTopic)
 
     val testDriver = createTestDriver(builder)
     val testInput = testDriver.createInput[String, String](sourceTopic)
     val testOutput = testDriver.createOutput[String, Long](sinkTopic)
 
     {
-      testInput.pipeInput("1", "value1")
+      testInput.pipeInput("a", "passes filter : add new row to table")
       val record = testOutput.readKeyValue
-      record.key shouldBe "1"
+      record.key shouldBe "a"
+      record.value shouldBe 1
+    }
+    {
+      testInput.pipeInput("a", "fails filter : remove existing row from table")
+      val record = testOutput.readKeyValue
+      record.key shouldBe "a"
       record.value shouldBe (null: java.lang.Long)
     }
     {
-      testInput.pipeInput("1", "value2")
-      val record = testOutput.readKeyValue
-      record.key shouldBe "1"
-      record.value shouldBe 2
-    }
-    {
-      testInput.pipeInput("2", "value1")
-      val record = testOutput.readKeyValue
-      record.key shouldBe "2"
-      record.value shouldBe (null: java.lang.Long)
+      testInput.pipeInput("b", "fails filter : no output")
+      testOutput.isEmpty shouldBe true
     }
     testOutput.isEmpty shouldBe true
 
@@ -159,13 +157,13 @@ class KTableTest extends FlatSpec with Matchers with TestDriver {
     val sourceTopic = "source"
     val sinkTopic = "sink"
     val window = TimeWindows.of(Duration.ofSeconds(1L))
-    val suppression = Suppressed.untilTimeLimit[Windowed[String]](Duration.ofSeconds(2L), BufferConfig.unbounded())
+    val suppression = JSuppressed.untilTimeLimit[Windowed[String]](Duration.ofSeconds(2L), BufferConfig.unbounded())
 
     val table: KTable[Windowed[String], Long] = builder
       .stream[String, String](sourceTopic)
       .groupByKey
       .windowedBy(window)
-      .count
+      .count()
       .suppress(suppression)
 
     table.toStream((k, _) => s"${k.window().start()}:${k.window().end()}:${k.key()}").to(sinkTopic)
@@ -216,13 +214,13 @@ class KTableTest extends FlatSpec with Matchers with TestDriver {
     val sourceTopic = "source"
     val sinkTopic = "sink"
     val window = TimeWindows.of(Duration.ofSeconds(1L)).grace(Duration.ofSeconds(1L))
-    val suppression = Suppressed.untilWindowCloses[String](BufferConfig.unbounded())
+    val suppression = JSuppressed.untilWindowCloses(BufferConfig.unbounded())
 
     val table: KTable[Windowed[String], Long] = builder
       .stream[String, String](sourceTopic)
       .groupByKey
       .windowedBy(window)
-      .count
+      .count()
       .suppress(suppression)
 
     table.toStream((k, _) => s"${k.window().start()}:${k.window().end()}:${k.key()}").to(sinkTopic)
@@ -274,13 +272,13 @@ class KTableTest extends FlatSpec with Matchers with TestDriver {
     val sinkTopic = "sink"
     // Very similar to SuppressScenarioTest.shouldSupportFinalResultsForSessionWindows
     val window = SessionWindows.`with`(Duration.ofMillis(5L)).grace(Duration.ofMillis(10L))
-    val suppression = Suppressed.untilWindowCloses[String](BufferConfig.unbounded())
+    val suppression = JSuppressed.untilWindowCloses(BufferConfig.unbounded())
 
     val table: KTable[Windowed[String], Long] = builder
       .stream[String, String](sourceTopic)
       .groupByKey
       .windowedBy(window)
-      .count
+      .count()
       .suppress(suppression)
 
     table.toStream((k, _) => s"${k.window().start()}:${k.window().end()}:${k.key()}").to(sinkTopic)
@@ -343,12 +341,12 @@ class KTableTest extends FlatSpec with Matchers with TestDriver {
     val builder = new StreamsBuilder()
     val sourceTopic = "source"
     val sinkTopic = "sink"
-    val suppression = Suppressed.untilTimeLimit[String](Duration.ofSeconds(2L), BufferConfig.unbounded())
+    val suppression = JSuppressed.untilTimeLimit[String](Duration.ofSeconds(2L), BufferConfig.unbounded())
 
     val table: KTable[String, Long] = builder
       .stream[String, String](sourceTopic)
       .groupByKey
-      .count
+      .count()
       .suppress(suppression)
 
     table.toStream.to(sinkTopic)

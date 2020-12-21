@@ -25,12 +25,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.utils.Scheduler;
+import org.apache.kafka.common.utils.ThreadUtils;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.trogdor.common.JsonUtil;
 import org.apache.kafka.trogdor.common.Node;
 import org.apache.kafka.trogdor.common.Platform;
-import org.apache.kafka.trogdor.common.ThreadUtils;
 import org.apache.kafka.trogdor.rest.RequestConflictException;
 import org.apache.kafka.trogdor.rest.TaskDone;
 import org.apache.kafka.trogdor.rest.TaskPending;
@@ -671,7 +671,7 @@ public final class TaskManager {
     /**
      * Initiate shutdown, but do not wait for it to complete.
      */
-    public void beginShutdown(boolean stopAgents) throws ExecutionException, InterruptedException {
+    public void beginShutdown(boolean stopAgents) {
         if (shutdown.compareAndSet(false, true)) {
             executor.submit(new Shutdown(stopAgents));
         }
@@ -680,7 +680,7 @@ public final class TaskManager {
     /**
      * Wait for shutdown to complete.  May be called prior to beginShutdown.
      */
-    public void waitForShutdown() throws ExecutionException, InterruptedException {
+    public void waitForShutdown() throws InterruptedException {
         while (!executor.awaitTermination(1, TimeUnit.DAYS)) { }
     }
 

@@ -39,6 +39,7 @@ import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.ValueJoiner;
 import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.utils.UniqueTopicSerdeScope;
 import org.apache.kafka.test.IntegrationTest;
 import org.apache.kafka.test.TestUtils;
 import org.junit.After;
@@ -50,6 +51,7 @@ import org.junit.experimental.categories.Category;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
@@ -90,19 +92,16 @@ public class KTableKTableForeignKeyInnerJoinMultiIntegrationTest {
 
         PRODUCER_CONFIG_1.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, CLUSTER.bootstrapServers());
         PRODUCER_CONFIG_1.put(ProducerConfig.ACKS_CONFIG, "all");
-        PRODUCER_CONFIG_1.put(ProducerConfig.RETRIES_CONFIG, 0);
         PRODUCER_CONFIG_1.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class);
         PRODUCER_CONFIG_1.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, FloatSerializer.class);
 
         PRODUCER_CONFIG_2.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, CLUSTER.bootstrapServers());
         PRODUCER_CONFIG_2.put(ProducerConfig.ACKS_CONFIG, "all");
-        PRODUCER_CONFIG_2.put(ProducerConfig.RETRIES_CONFIG, 0);
         PRODUCER_CONFIG_2.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         PRODUCER_CONFIG_2.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, LongSerializer.class);
 
         PRODUCER_CONFIG_3.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, CLUSTER.bootstrapServers());
         PRODUCER_CONFIG_3.put(ProducerConfig.ACKS_CONFIG, "all");
-        PRODUCER_CONFIG_3.put(ProducerConfig.RETRIES_CONFIG, 0);
         PRODUCER_CONFIG_3.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class);
         PRODUCER_CONFIG_3.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
 
@@ -135,8 +134,8 @@ public class KTableKTableForeignKeyInnerJoinMultiIntegrationTest {
         );
 
         //Partitions pre-computed using the default Murmur2 hash, just to ensure that all 3 partitions will be exercised.
-        final List<KeyValue<Integer, String>> table3 = Arrays.asList(
-                new KeyValue<>(10, "waffle")
+        final List<KeyValue<Integer, String>> table3 = Collections.singletonList(
+            new KeyValue<>(10, "waffle")
         );
 
         IntegrationTestUtils.produceKeyValuesSynchronously(TABLE_1, table1, PRODUCER_CONFIG_1, MOCK_TIME);
@@ -206,17 +205,30 @@ public class KTableKTableForeignKeyInnerJoinMultiIntegrationTest {
     }
 
     private KafkaStreams prepareTopology(final String queryableName, final String queryableNameTwo) {
+        final UniqueTopicSerdeScope serdeScope = new UniqueTopicSerdeScope();
         final StreamsBuilder builder = new StreamsBuilder();
 
-        final KTable<Integer, Float> table1 = builder.table(TABLE_1, Consumed.with(Serdes.Integer(), Serdes.Float()));
-        final KTable<String, Long> table2 = builder.table(TABLE_2, Consumed.with(Serdes.String(), Serdes.Long()));
-        final KTable<Integer, String> table3 = builder.table(TABLE_3, Consumed.with(Serdes.Integer(), Serdes.String()));
+        final KTable<Integer, Float> table1 = builder.table(
+            TABLE_1,
+            Consumed.with(serdeScope.decorateSerde(Serdes.Integer(), streamsConfig, true),
+                          serdeScope.decorateSerde(Serdes.Float(), streamsConfig, false))
+        );
+        final KTable<String, Long> table2 = builder.table(
+            TABLE_2,
+            Consumed.with(serdeScope.decorateSerde(Serdes.String(), streamsConfig, true),
+                          serdeScope.decorateSerde(Serdes.Long(), streamsConfig, false))
+        );
+        final KTable<Integer, String> table3 = builder.table(
+            TABLE_3,
+            Consumed.with(serdeScope.decorateSerde(Serdes.Integer(), streamsConfig, true),
+                          serdeScope.decorateSerde(Serdes.String(), streamsConfig, false))
+        );
 
         final Materialized<Integer, String, KeyValueStore<Bytes, byte[]>> materialized;
         if (queryableName != null) {
             materialized = Materialized.<Integer, String, KeyValueStore<Bytes, byte[]>>as(queryableName)
-                    .withKeySerde(Serdes.Integer())
-                    .withValueSerde(Serdes.String())
+                    .withKeySerde(serdeScope.decorateSerde(Serdes.Integer(), streamsConfig, true))
+                    .withValueSerde(serdeScope.decorateSerde(Serdes.String(), streamsConfig, false))
                     .withCachingDisabled();
         } else {
             throw new RuntimeException("Current implementation of joinOnForeignKey requires a materialized store");
@@ -225,8 +237,8 @@ public class KTableKTableForeignKeyInnerJoinMultiIntegrationTest {
         final Materialized<Integer, String, KeyValueStore<Bytes, byte[]>> materializedTwo;
         if (queryableNameTwo != null) {
             materializedTwo = Materialized.<Integer, String, KeyValueStore<Bytes, byte[]>>as(queryableNameTwo)
-                    .withKeySerde(Serdes.Integer())
-                    .withValueSerde(Serdes.String())
+                    .withKeySerde(serdeScope.decorateSerde(Serdes.Integer(), streamsConfig, true))
+                    .withValueSerde(serdeScope.decorateSerde(Serdes.String(), streamsConfig, false))
                     .withCachingDisabled();
         } else {
             throw new RuntimeException("Current implementation of joinOnForeignKey requires a materialized store");
@@ -247,7 +259,9 @@ public class KTableKTableForeignKeyInnerJoinMultiIntegrationTest {
         table1.join(table2, tableOneKeyExtractor, joiner, materialized)
               .join(table3, joinedTableKeyExtractor, joinerTwo, materializedTwo)
             .toStream()
-            .to(OUTPUT, Produced.with(Serdes.Integer(), Serdes.String()));
+            .to(OUTPUT,
+                Produced.with(serdeScope.decorateSerde(Serdes.Integer(), streamsConfig, true),
+                              serdeScope.decorateSerde(Serdes.String(), streamsConfig, false)));
 
         return new KafkaStreams(builder.build(streamsConfig), streamsConfig);
     }

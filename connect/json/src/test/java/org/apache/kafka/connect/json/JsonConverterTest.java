@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.connect.json;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -65,8 +66,11 @@ import static org.junit.Assert.fail;
 public class JsonConverterTest {
     private static final String TOPIC = "topic";
 
-    ObjectMapper objectMapper = new ObjectMapper();
-    JsonConverter converter = new JsonConverter();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+        .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+        .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
+
+    private final JsonConverter converter = new JsonConverter();
 
     @Before
     public void setUp() {
@@ -174,12 +178,51 @@ public class JsonConverterTest {
     }
 
     @Test
+    public void structWithOptionalFieldToConnect() {
+        byte[] structJson = "{ \"schema\": { \"type\": \"struct\", \"fields\": [{ \"field\":\"optional\", \"type\": \"string\", \"optional\": true }, {  \"field\": \"required\", \"type\": \"string\" }] }, \"payload\": { \"required\": \"required\" } }".getBytes();
+        Schema expectedSchema = SchemaBuilder.struct().field("optional", Schema.OPTIONAL_STRING_SCHEMA).field("required", Schema.STRING_SCHEMA).build();
+        Struct expected = new Struct(expectedSchema).put("required", "required");
+        SchemaAndValue converted = converter.toConnectData(TOPIC, structJson);
+        assertEquals(new SchemaAndValue(expectedSchema, expected), converted);
+    }
+
+    @Test
     public void nullToConnect() {
         // When schemas are enabled, trying to decode a tombstone should be an empty envelope
         // the behavior is the same as when the json is "{ "schema": null, "payload": null }"
         // to keep compatibility with the record
         SchemaAndValue converted = converter.toConnectData(TOPIC, null);
         assertEquals(SchemaAndValue.NULL, converted);
+    }
+
+    /**
+     * When schemas are disabled, empty data should be decoded to an empty envelope.
+     * This test verifies the case where `schemas.enable` configuration is set to false, and
+     * {@link JsonConverter} converts empty bytes to {@link SchemaAndValue#NULL}.
+     */
+    @Test
+    public void emptyBytesToConnect() {
+        // This characterizes the messages with empty data when Json schemas is disabled
+        Map<String, Boolean> props = Collections.singletonMap("schemas.enable", false);
+        converter.configure(props, true);
+        SchemaAndValue converted = converter.toConnectData(TOPIC, "".getBytes());
+        assertEquals(SchemaAndValue.NULL, converted);
+    }
+
+    /**
+     * When schemas are disabled, fields are mapped to Connect maps.
+     */
+    @Test
+    public void schemalessWithEmptyFieldValueToConnect() {
+        // This characterizes the messages with empty data when Json schemas is disabled
+        Map<String, Boolean> props = Collections.singletonMap("schemas.enable", false);
+        converter.configure(props, true);
+        String input = "{ \"a\": \"\", \"b\": null}";
+        SchemaAndValue converted = converter.toConnectData(TOPIC, input.getBytes());
+        Map<String, String> expected = new HashMap<>();
+        expected.put("a", "");
+        expected.put("b", null);
+        assertEquals(new SchemaAndValue(null, expected), converted);
     }
 
     @Test
@@ -258,6 +301,16 @@ public class JsonConverterTest {
         BigDecimal reference = new BigDecimal(new BigInteger("156"), 2);
         Schema schema = Decimal.schema(2);
         String msg = "{ \"schema\": { \"type\": \"bytes\", \"name\": \"org.apache.kafka.connect.data.Decimal\", \"version\": 1, \"parameters\": { \"scale\": \"2\" } }, \"payload\": 1.56 }";
+        SchemaAndValue schemaAndValue = converter.toConnectData(TOPIC, msg.getBytes());
+        assertEquals(schema, schemaAndValue.schema());
+        assertEquals(reference, schemaAndValue.value());
+    }
+
+    @Test
+    public void numericDecimalWithTrailingZerosToConnect() {
+        BigDecimal reference = new BigDecimal(new BigInteger("15600"), 4);
+        Schema schema = Decimal.schema(4);
+        String msg = "{ \"schema\": { \"type\": \"bytes\", \"name\": \"org.apache.kafka.connect.data.Decimal\", \"version\": 1, \"parameters\": { \"scale\": \"4\" } }, \"payload\": 1.5600 }";
         SchemaAndValue schemaAndValue = converter.toConnectData(TOPIC, msg.getBytes());
         assertEquals(schema, schemaAndValue.schema());
         assertEquals(reference, schemaAndValue.value());
@@ -625,7 +678,18 @@ public class JsonConverterTest {
     }
 
     @Test
-    public void decimalToJsonWithoutSchema() throws IOException {
+    public void decimalWithTrailingZerosToNumericJson() {
+        converter.configure(Collections.singletonMap(JsonConverterConfig.DECIMAL_FORMAT_CONFIG, DecimalFormat.NUMERIC.name()), false);
+        JsonNode converted = parse(converter.fromConnectData(TOPIC, Decimal.schema(4), new BigDecimal(new BigInteger("15600"), 4)));
+        validateEnvelope(converted);
+        assertEquals(parse("{ \"type\": \"bytes\", \"optional\": false, \"name\": \"org.apache.kafka.connect.data.Decimal\", \"version\": 1, \"parameters\": { \"scale\": \"4\" } }"),
+            converted.get(JsonSchema.ENVELOPE_SCHEMA_FIELD_NAME));
+        assertTrue("expected node to be numeric", converted.get(JsonSchema.ENVELOPE_PAYLOAD_FIELD_NAME).isNumber());
+        assertEquals(new BigDecimal("1.5600"), converted.get(JsonSchema.ENVELOPE_PAYLOAD_FIELD_NAME).decimalValue());
+    }
+
+    @Test
+    public void decimalToJsonWithoutSchema() {
         assertThrows(
             "expected data exception when serializing BigDecimal without schema",
             DataException.class,

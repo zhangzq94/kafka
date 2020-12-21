@@ -57,9 +57,6 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 public ValueAndTimestamp<V> get(final K key) {
                     return ValueAndTimestamp.make(map.get(key), -1);
                 }
-
-                @Override
-                public void close() {}
             };
         }
 
@@ -82,6 +79,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );
@@ -106,6 +104,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );
@@ -130,6 +129,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );
@@ -155,6 +155,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );
@@ -180,6 +181,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );
@@ -205,6 +207,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
             new SubscriptionResolverJoinProcessorSupplier<>(
                 valueGetterSupplier,
                 STRING_SERIALIZER,
+                () -> "value-hash-dummy-topic",
                 JOINER,
                 leftJoin
             );

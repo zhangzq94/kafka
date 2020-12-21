@@ -30,6 +30,7 @@ import org.apache.kafka.common.network.Selector;
 import org.apache.kafka.common.security.JaasContext;
 import org.apache.kafka.common.security.TestSecurityConfig;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.test.TestUtils;
 import org.junit.After;
@@ -44,6 +45,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -54,7 +56,7 @@ import static org.junit.Assert.assertTrue;
 public class SaslAuthenticatorFailureDelayTest {
     private static final int BUFFER_SIZE = 4 * 1024;
 
-    private final MockTime time = new MockTime(10);
+    private final MockTime time = new MockTime(1);
     private NioEchoServer server;
     private Selector selector;
     private ChannelBuilder channelBuilder;
@@ -114,6 +116,38 @@ public class SaslAuthenticatorFailureDelayTest {
         server = createEchoServer(securityProtocol);
         createAndCheckClientAuthenticationFailure(securityProtocol, node, "PLAIN",
                 "Authentication failed: Invalid username or password");
+        server.verifyAuthenticationMetrics(0, 1);
+    }
+
+    /**
+     * Tests that SASL/SCRAM clients with invalid password fail authentication with
+     * connection close delay if configured.
+     */
+    @Test
+    public void testInvalidPasswordSaslScram() throws Exception {
+        String node = "0";
+        SecurityProtocol securityProtocol = SecurityProtocol.SASL_SSL;
+        TestJaasConfig jaasConfig = configureMechanisms("SCRAM-SHA-256", Collections.singletonList("SCRAM-SHA-256"));
+        jaasConfig.setClientOptions("SCRAM-SHA-256", TestJaasConfig.USERNAME, "invalidpassword");
+
+        server = createEchoServer(securityProtocol);
+        createAndCheckClientAuthenticationFailure(securityProtocol, node, "SCRAM-SHA-256", null);
+        server.verifyAuthenticationMetrics(0, 1);
+    }
+
+    /**
+     * Tests that clients with disabled SASL mechanism fail authentication with
+     * connection close delay if configured.
+     */
+    @Test
+    public void testDisabledSaslMechanism() throws Exception {
+        String node = "0";
+        SecurityProtocol securityProtocol = SecurityProtocol.SASL_SSL;
+        TestJaasConfig jaasConfig = configureMechanisms("SCRAM-SHA-256", Collections.singletonList("SCRAM-SHA-256"));
+        jaasConfig.setClientOptions("PLAIN", TestJaasConfig.USERNAME, "invalidpassword");
+
+        server = createEchoServer(securityProtocol);
+        createAndCheckClientAuthenticationFailure(securityProtocol, node, "SCRAM-SHA-256", null);
         server.verifyAuthenticationMetrics(0, 1);
     }
 
@@ -184,7 +218,8 @@ public class SaslAuthenticatorFailureDelayTest {
 
         String saslMechanism = (String) saslClientConfigs.get(SaslConfigs.SASL_MECHANISM);
         this.channelBuilder = ChannelBuilders.clientChannelBuilder(securityProtocol, JaasContext.Type.CLIENT,
-                new TestSecurityConfig(clientConfigs), null, saslMechanism, time, true);
+                new TestSecurityConfig(clientConfigs), null, saslMechanism, time, true,
+                new LogContext());
         this.selector = NetworkTestUtils.createSelector(channelBuilder, time);
     }
 
@@ -213,7 +248,7 @@ public class SaslAuthenticatorFailureDelayTest {
         Exception exception = finalState.exception();
         assertTrue("Invalid exception class " + exception.getClass(), exception instanceof SaslAuthenticationException);
         if (expectedErrorMessage == null)
-            expectedErrorMessage = "Authentication failed due to invalid credentials with SASL mechanism " + mechanism;
+            expectedErrorMessage = "Authentication failed during authentication due to invalid credentials with SASL mechanism " + mechanism;
         assertEquals(expectedErrorMessage, exception.getMessage());
     }
 

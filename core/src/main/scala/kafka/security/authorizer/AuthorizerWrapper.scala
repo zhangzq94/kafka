@@ -21,23 +21,72 @@ import java.util.concurrent.{CompletableFuture, CompletionStage}
 import java.{lang, util}
 
 import kafka.network.RequestChannel.Session
-import kafka.security.auth.{Acl, Operation, Resource}
+import kafka.security.auth.{Acl, Operation, PermissionType, Resource, SimpleAclAuthorizer, ResourceType => ResourceTypeLegacy}
+import kafka.security.authorizer.AuthorizerWrapper._
 import org.apache.kafka.common.Endpoint
-import org.apache.kafka.common.acl.{AccessControlEntry, AclBinding, AclBindingFilter}
+import org.apache.kafka.common.acl._
 import org.apache.kafka.common.errors.{ApiException, InvalidRequestException}
+import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests.ApiError
-import org.apache.kafka.common.resource.ResourcePattern
+import org.apache.kafka.common.resource.{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType}
+import org.apache.kafka.common.security.auth.KafkaPrincipal
+import org.apache.kafka.common.utils.SecurityUtils
+import org.apache.kafka.common.utils.SecurityUtils.parseKafkaPrincipal
 import org.apache.kafka.server.authorizer.AclDeleteResult.AclBindingDeleteResult
 import org.apache.kafka.server.authorizer.{AuthorizableRequestContext, AuthorizerServerInfo, _}
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.{Seq, immutable, mutable}
+import scala.jdk.CollectionConverters._
+import scala.util.{Failure, Success, Try}
 
+@deprecated("Use kafka.security.authorizer.AclAuthorizer", "Since 2.5")
+object AuthorizerWrapper {
+
+  def convertToResourceAndAcl(filter: AclBindingFilter): Either[ApiError, (Resource, Acl)] = {
+    (for {
+      resourceType <- Try(ResourceTypeLegacy.fromJava(filter.patternFilter.resourceType))
+      principal <- Try(parseKafkaPrincipal(filter.entryFilter.principal))
+      operation <- Try(Operation.fromJava(filter.entryFilter.operation))
+      permissionType <- Try(PermissionType.fromJava(filter.entryFilter.permissionType))
+      resource = Resource(resourceType, filter.patternFilter.name, filter.patternFilter.patternType)
+      acl = Acl(principal, permissionType, filter.entryFilter.host, operation)
+    } yield (resource, acl)) match {
+      case Failure(throwable) => Left(new ApiError(Errors.INVALID_REQUEST, throwable.getMessage))
+      case Success(s) => Right(s)
+    }
+  }
+
+  def convertToAclBinding(resource: Resource, acl: Acl): AclBinding = {
+    val resourcePattern = new ResourcePattern(resource.resourceType.toJava, resource.name, resource.patternType)
+    new AclBinding(resourcePattern, convertToAccessControlEntry(acl))
+  }
+
+  def convertToAccessControlEntry(acl: Acl): AccessControlEntry = {
+    new AccessControlEntry(acl.principal.toString, acl.host.toString,
+      acl.operation.toJava, acl.permissionType.toJava)
+  }
+
+  def convertToAcl(ace: AccessControlEntry): Acl = {
+    new Acl(parseKafkaPrincipal(ace.principal), PermissionType.fromJava(ace.permissionType), ace.host,
+      Operation.fromJava(ace.operation))
+  }
+
+  def convertToResource(resourcePattern: ResourcePattern): Resource = {
+    Resource(ResourceTypeLegacy.fromJava(resourcePattern.resourceType), resourcePattern.name, resourcePattern.patternType)
+  }
+}
+
+@deprecated("Use kafka.security.authorizer.AclAuthorizer", "Since 2.5")
 class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.Authorizer) extends Authorizer {
+
+  var shouldAllowEveryoneIfNoAclIsFound = false
 
   override def configure(configs: util.Map[String, _]): Unit = {
     baseAuthorizer.configure(configs)
+    shouldAllowEveryoneIfNoAclIsFound = (configs.asScala.get(
+        AclAuthorizer.AllowEveryoneIfNoAclIsFoundProp).exists(_.toString.toBoolean)
+      && baseAuthorizer.isInstanceOf[SimpleAclAuthorizer])
   }
 
   override def start(serverInfo: AuthorizerServerInfo): util.Map[Endpoint, _ <: CompletionStage[Void]] = {
@@ -49,7 +98,7 @@ class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.A
     val session = Session(requestContext.principal, requestContext.clientAddress)
     actions.asScala.map { action =>
       val operation = Operation.fromJava(action.operation)
-      if (baseAuthorizer.authorize(session, operation, AuthorizerUtils.convertToResource(action.resourcePattern)))
+      if (baseAuthorizer.authorize(session, operation, convertToResource(action.resourcePattern)))
         AuthorizationResult.ALLOWED
       else
         AuthorizationResult.DENIED
@@ -60,7 +109,7 @@ class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.A
                           aclBindings: util.List[AclBinding]): util.List[_ <: CompletionStage[AclCreateResult]] = {
     aclBindings.asScala
       .map { aclBinding =>
-        AuthorizerUtils.convertToResourceAndAcl(aclBinding.toFilter) match {
+        convertToResourceAndAcl(aclBinding.toFilter) match {
           case Left(apiError) => new AclCreateResult(apiError.exception)
           case Right((resource, acl)) =>
             try {
@@ -83,7 +132,7 @@ class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.A
     if (filters.forall(_.matchesAtMostOne)) {
       // Delete based on a list of ACL fixtures.
       for ((filter, i) <- filters.zipWithIndex) {
-        AuthorizerUtils.convertToResourceAndAcl(filter) match {
+        convertToResourceAndAcl(filter) match {
           case Left(apiError) => results.put(i, new AclDeleteResult(apiError.exception))
           case Right(binding) => toDelete.put(i, ArrayBuffer(binding))
         }
@@ -105,7 +154,7 @@ class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.A
 
     for ((i, acls) <- toDelete) {
       val deletionResults = acls.flatMap { case (resource, acl) =>
-        val aclBinding = AuthorizerUtils.convertToAclBinding(resource, acl)
+        val aclBinding = convertToAclBinding(resource, acl)
         try {
           if (baseAuthorizer.removeAcls(immutable.Set(acl), resource))
             Some(new AclBindingDeleteResult(aclBinding))
@@ -126,11 +175,49 @@ class AuthorizerWrapper(private[kafka] val baseAuthorizer: kafka.security.auth.A
 
   override def acls(filter: AclBindingFilter): lang.Iterable[AclBinding] = {
     baseAuthorizer.getAcls().flatMap { case (resource, acls) =>
-      acls.map(acl => AuthorizerUtils.convertToAclBinding(resource, acl)).filter(filter.matches)
+      acls.map(acl => convertToAclBinding(resource, acl)).filter(filter.matches)
     }.asJava
   }
 
   override def close(): Unit = {
     baseAuthorizer.close()
   }
+
+  override def authorizeByResourceType(requestContext: AuthorizableRequestContext,
+                                       op: AclOperation,
+                                       resourceType: ResourceType): AuthorizationResult = {
+    SecurityUtils.authorizeByResourceTypeCheckArgs(op, resourceType)
+
+    if (super.authorizeByResourceType(requestContext, op, resourceType) == AuthorizationResult.ALLOWED)
+      AuthorizationResult.ALLOWED
+    else if (denyAllResource(requestContext, op, resourceType) || !shouldAllowEveryoneIfNoAclIsFound)
+      AuthorizationResult.DENIED
+    else
+      AuthorizationResult.ALLOWED
+  }
+
+  private def denyAllResource(requestContext: AuthorizableRequestContext,
+                              op: AclOperation,
+                              resourceType: ResourceType): Boolean = {
+    val resourceTypeFilter = new ResourcePatternFilter(
+      resourceType, Resource.WildCardResource, PatternType.LITERAL)
+    val principal = new KafkaPrincipal(
+      requestContext.principal.getPrincipalType, requestContext.principal.getName).toString
+    val host = requestContext.clientAddress().getHostAddress
+    val entryFilter = new AccessControlEntryFilter(null, null, op, AclPermissionType.DENY)
+    val entryFilterAllOp = new AccessControlEntryFilter(null, null, AclOperation.ALL, AclPermissionType.DENY)
+    val aclFilter = new AclBindingFilter(resourceTypeFilter, entryFilter)
+    val aclFilterAllOp = new AclBindingFilter(resourceTypeFilter, entryFilterAllOp)
+
+    (acls(aclFilter).asScala.exists(b => principalHostMatch(b.entry(), principal, host))
+      || acls(aclFilterAllOp).asScala.exists(b => principalHostMatch(b.entry(), principal, host)))
+  }
+
+  private def principalHostMatch(ace: AccessControlEntry,
+                                 principal: String,
+                                 host: String): Boolean = {
+    ((ace.host() == AclEntry.WildcardHost || ace.host() == host)
+      && (ace.principal() == AclEntry.WildcardPrincipalString || ace.principal() == principal))
+  }
+
 }

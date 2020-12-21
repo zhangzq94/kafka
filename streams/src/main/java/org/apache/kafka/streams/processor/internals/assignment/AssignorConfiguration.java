@@ -19,116 +19,76 @@ package org.apache.kafka.streams.processor.internals.assignment;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.RebalanceProtocol;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.streams.internals.QuietStreamsConfig;
+import org.apache.kafka.streams.StreamsConfig.InternalConfig;
+import org.apache.kafka.streams.processor.internals.ClientUtils;
 import org.apache.kafka.streams.processor.internals.InternalTopicManager;
-import org.apache.kafka.streams.processor.internals.TaskManager;
 import org.slf4j.Logger;
 
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.kafka.common.utils.Utils.getHost;
 import static org.apache.kafka.common.utils.Utils.getPort;
+import static org.apache.kafka.streams.StreamsConfig.InternalConfig.INTERNAL_TASK_ASSIGNOR_CLASS;
 import static org.apache.kafka.streams.processor.internals.assignment.StreamsAssignmentProtocolVersions.LATEST_SUPPORTED_VERSION;
 
 public final class AssignorConfiguration {
+    private final String taskAssignorClass;
+
     private final String logPrefix;
     private final Logger log;
-    private final Integer numStandbyReplicas;
-    @SuppressWarnings("deprecation")
-    private final org.apache.kafka.streams.processor.PartitionGrouper partitionGrouper;
-    private final String userEndPoint;
-    private final TaskManager taskManager;
-    private final InternalTopicManager internalTopicManager;
-    private final CopartitionedTopicsEnforcer copartitionedTopicsEnforcer;
-    private final StreamsConfig streamsConfig;
+    private final ReferenceContainer referenceContainer;
 
-    @SuppressWarnings("deprecation")
+    private final StreamsConfig streamsConfig;
+    private final Map<String, ?> internalConfigs;
+
     public AssignorConfiguration(final Map<String, ?> configs) {
-        streamsConfig = new QuietStreamsConfig(configs);
+        // NOTE: If you add a new config to pass through to here, be sure to test it in a real
+        // application. Since we filter out some configurations, we may have to explicitly copy
+        // them over when we construct the Consumer.
+        streamsConfig = new ClientUtils.QuietStreamsConfig(configs);
+        internalConfigs = configs;
 
         // Setting the logger with the passed in client thread name
         logPrefix = String.format("stream-thread [%s] ", streamsConfig.getString(CommonClientConfigs.CLIENT_ID_CONFIG));
         final LogContext logContext = new LogContext(logPrefix);
         log = logContext.logger(getClass());
 
-        numStandbyReplicas = streamsConfig.getInt(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG);
-
-        partitionGrouper = streamsConfig.getConfiguredInstance(
-            StreamsConfig.PARTITION_GROUPER_CLASS_CONFIG,
-            org.apache.kafka.streams.processor.PartitionGrouper.class
-        );
-
-        final String configuredUserEndpoint = streamsConfig.getString(StreamsConfig.APPLICATION_SERVER_CONFIG);
-        if (configuredUserEndpoint != null && !configuredUserEndpoint.isEmpty()) {
-            try {
-                final String host = getHost(configuredUserEndpoint);
-                final Integer port = getPort(configuredUserEndpoint);
-
-                if (host == null || port == null) {
-                    throw new ConfigException(
-                        String.format(
-                            "%s Config %s isn't in the correct format. Expected a host:port pair but received %s",
-                            logPrefix, StreamsConfig.APPLICATION_SERVER_CONFIG, configuredUserEndpoint
-                        )
-                    );
-                }
-            } catch (final NumberFormatException nfe) {
-                throw new ConfigException(
-                    String.format("%s Invalid port supplied in %s for config %s: %s",
-                                  logPrefix, configuredUserEndpoint, StreamsConfig.APPLICATION_SERVER_CONFIG, nfe)
-                );
+        {
+            final Object o = configs.get(InternalConfig.REFERENCE_CONTAINER_PARTITION_ASSIGNOR);
+            if (o == null) {
+                final KafkaException fatalException = new KafkaException("ReferenceContainer is not specified");
+                log.error(fatalException.getMessage(), fatalException);
+                throw fatalException;
             }
-            userEndPoint = configuredUserEndpoint;
-        } else {
-            userEndPoint = null;
+
+            if (!(o instanceof ReferenceContainer)) {
+                final KafkaException fatalException = new KafkaException(
+                    String.format("%s is not an instance of %s", o.getClass().getName(), ReferenceContainer.class.getName())
+                );
+                log.error(fatalException.getMessage(), fatalException);
+                throw fatalException;
+            }
+
+            referenceContainer = (ReferenceContainer) o;
         }
 
-        final Object o = configs.get(StreamsConfig.InternalConfig.TASK_MANAGER_FOR_PARTITION_ASSIGNOR);
-        if (o == null) {
-            final KafkaException fatalException = new KafkaException("TaskManager is not specified");
-            log.error(fatalException.getMessage(), fatalException);
-            throw fatalException;
+        {
+            final String o = (String) configs.get(INTERNAL_TASK_ASSIGNOR_CLASS);
+            if (o == null) {
+                taskAssignorClass = HighAvailabilityTaskAssignor.class.getName();
+            } else {
+                taskAssignorClass = o;
+            }
         }
-
-        if (!(o instanceof TaskManager)) {
-            final KafkaException fatalException = new KafkaException(
-                String.format("%s is not an instance of %s", o.getClass().getName(), TaskManager.class.getName())
-            );
-            log.error(fatalException.getMessage(), fatalException);
-            throw fatalException;
-        }
-
-        taskManager = (TaskManager) o;
-
-        internalTopicManager = new InternalTopicManager(taskManager.adminClient(), streamsConfig);
-
-        copartitionedTopicsEnforcer = new CopartitionedTopicsEnforcer(logPrefix);
     }
 
-    public AtomicInteger getAssignmentErrorCode(final Map<String, ?> configs) {
-        final Object ai = configs.get(StreamsConfig.InternalConfig.ASSIGNMENT_ERROR_CODE);
-        if (ai == null) {
-            final KafkaException fatalException = new KafkaException("assignmentErrorCode is not specified");
-            log.error(fatalException.getMessage(), fatalException);
-            throw fatalException;
-        }
-
-        if (!(ai instanceof AtomicInteger)) {
-            final KafkaException fatalException = new KafkaException(
-                String.format("%s is not an instance of %s", ai.getClass().getName(), AtomicInteger.class.getName())
-            );
-            log.error(fatalException.getMessage(), fatalException);
-            throw fatalException;
-        }
-        return (AtomicInteger) ai;
-    }
-
-    public TaskManager getTaskManager() {
-        return taskManager;
+    public ReferenceContainer referenceContainer() {
+        return referenceContainer;
     }
 
     public RebalanceProtocol rebalanceProtocol() {
@@ -195,24 +155,124 @@ public final class AssignorConfiguration {
         return priorVersion;
     }
 
-    public int getNumStandbyReplicas() {
-        return numStandbyReplicas;
-    }
-
     @SuppressWarnings("deprecation")
-    public org.apache.kafka.streams.processor.PartitionGrouper getPartitionGrouper() {
-        return partitionGrouper;
+    public org.apache.kafka.streams.processor.PartitionGrouper partitionGrouper() {
+        return streamsConfig.getConfiguredInstance(
+            StreamsConfig.PARTITION_GROUPER_CLASS_CONFIG,
+            org.apache.kafka.streams.processor.PartitionGrouper.class
+        );
     }
 
-    public String getUserEndPoint() {
-        return userEndPoint;
+    public String userEndPoint() {
+        final String configuredUserEndpoint = streamsConfig.getString(StreamsConfig.APPLICATION_SERVER_CONFIG);
+        if (configuredUserEndpoint != null && !configuredUserEndpoint.isEmpty()) {
+            try {
+                final String host = getHost(configuredUserEndpoint);
+                final Integer port = getPort(configuredUserEndpoint);
+
+                if (host == null || port == null) {
+                    throw new ConfigException(
+                        String.format(
+                            "%s Config %s isn't in the correct format. Expected a host:port pair but received %s",
+                            logPrefix, StreamsConfig.APPLICATION_SERVER_CONFIG, configuredUserEndpoint
+                        )
+                    );
+                }
+            } catch (final NumberFormatException nfe) {
+                throw new ConfigException(
+                    String.format("%s Invalid port supplied in %s for config %s: %s",
+                                  logPrefix, configuredUserEndpoint, StreamsConfig.APPLICATION_SERVER_CONFIG, nfe)
+                );
+            }
+            return configuredUserEndpoint;
+        } else {
+            return null;
+        }
     }
 
-    public InternalTopicManager getInternalTopicManager() {
-        return internalTopicManager;
+    public InternalTopicManager internalTopicManager() {
+        return new InternalTopicManager(referenceContainer.time, referenceContainer.adminClient, streamsConfig);
     }
 
-    public CopartitionedTopicsEnforcer getCopartitionedTopicsEnforcer() {
-        return copartitionedTopicsEnforcer;
+    public CopartitionedTopicsEnforcer copartitionedTopicsEnforcer() {
+        return new CopartitionedTopicsEnforcer(logPrefix);
+    }
+
+    public AssignmentConfigs assignmentConfigs() {
+        return new AssignmentConfigs(streamsConfig);
+    }
+
+    public TaskAssignor taskAssignor() {
+        try {
+            return Utils.newInstance(taskAssignorClass, TaskAssignor.class);
+        } catch (final ClassNotFoundException e) {
+            throw new IllegalArgumentException(
+                "Expected an instantiable class name for " + INTERNAL_TASK_ASSIGNOR_CLASS,
+                e
+            );
+        }
+    }
+
+    public AssignmentListener assignmentListener() {
+        final Object o = internalConfigs.get(InternalConfig.ASSIGNMENT_LISTENER);
+        if (o == null) {
+            return stable -> { };
+        }
+
+        if (!(o instanceof AssignmentListener)) {
+            final KafkaException fatalException = new KafkaException(
+                String.format("%s is not an instance of %s", o.getClass().getName(), AssignmentListener.class.getName())
+            );
+            log.error(fatalException.getMessage(), fatalException);
+            throw fatalException;
+        }
+
+        return (AssignmentListener) o;
+    }
+
+    public interface AssignmentListener {
+        void onAssignmentComplete(final boolean stable);
+    }
+
+    public static class AssignmentConfigs {
+        public final long acceptableRecoveryLag;
+        public final int maxWarmupReplicas;
+        public final int numStandbyReplicas;
+        public final long probingRebalanceIntervalMs;
+
+        private AssignmentConfigs(final StreamsConfig configs) {
+            acceptableRecoveryLag = configs.getLong(StreamsConfig.ACCEPTABLE_RECOVERY_LAG_CONFIG);
+            maxWarmupReplicas = configs.getInt(StreamsConfig.MAX_WARMUP_REPLICAS_CONFIG);
+            numStandbyReplicas = configs.getInt(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG);
+            probingRebalanceIntervalMs = configs.getLong(StreamsConfig.PROBING_REBALANCE_INTERVAL_MS_CONFIG);
+        }
+
+        AssignmentConfigs(final Long acceptableRecoveryLag,
+                          final Integer maxWarmupReplicas,
+                          final Integer numStandbyReplicas,
+                          final Long probingRebalanceIntervalMs) {
+            this.acceptableRecoveryLag = validated(StreamsConfig.ACCEPTABLE_RECOVERY_LAG_CONFIG, acceptableRecoveryLag);
+            this.maxWarmupReplicas = validated(StreamsConfig.MAX_WARMUP_REPLICAS_CONFIG, maxWarmupReplicas);
+            this.numStandbyReplicas = validated(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, numStandbyReplicas);
+            this.probingRebalanceIntervalMs = validated(StreamsConfig.PROBING_REBALANCE_INTERVAL_MS_CONFIG, probingRebalanceIntervalMs);
+        }
+
+        private static <T> T validated(final String configKey, final T value) {
+            final ConfigDef.Validator validator = StreamsConfig.configDef().configKeys().get(configKey).validator;
+            if (validator != null) {
+                validator.ensureValid(configKey, value);
+            }
+            return value;
+        }
+
+        @Override
+        public String toString() {
+            return "AssignmentConfigs{" +
+                "\n  acceptableRecoveryLag=" + acceptableRecoveryLag +
+                "\n  maxWarmupReplicas=" + maxWarmupReplicas +
+                "\n  numStandbyReplicas=" + numStandbyReplicas +
+                "\n  probingRebalanceIntervalMs=" + probingRebalanceIntervalMs +
+                "\n}";
+        }
     }
 }

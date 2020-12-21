@@ -18,21 +18,19 @@
 package kafka.tools
 
 import java.io._
-import java.nio.ByteBuffer
 
-import kafka.coordinator.group.{GroupMetadataKey, GroupMetadataManager, OffsetKey}
+import kafka.coordinator.group.GroupMetadataManager
 import kafka.coordinator.transaction.TransactionLog
 import kafka.log._
 import kafka.serializer.Decoder
 import kafka.utils._
-import org.apache.kafka.clients.consumer.internals.ConsumerProtocol
-import org.apache.kafka.common.KafkaException
+import kafka.utils.Implicits._
 import org.apache.kafka.common.record._
-import org.apache.kafka.common.utils.{Time, Utils}
+import org.apache.kafka.common.utils.Utils
 
-import scala.collection.{Map, mutable}
+import scala.jdk.CollectionConverters._
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.JavaConverters._
 
 object DumpLogSegments {
 
@@ -71,7 +69,7 @@ object DumpLogSegments {
       }
     }
 
-    misMatchesForIndexFilesMap.foreach { case (fileName, listOfMismatches) =>
+    misMatchesForIndexFilesMap.forKeyValue { (fileName, listOfMismatches) =>
       System.err.println(s"Mismatches in :$fileName")
       listOfMismatches.foreach { case (indexOffset, logOffset) =>
         System.err.println(s"  Index offset: $indexOffset, log offset: $logOffset")
@@ -80,7 +78,7 @@ object DumpLogSegments {
 
     timeIndexDumpErrors.printErrors()
 
-    nonConsecutivePairsForLogFilesMap.foreach { case (fileName, listOfNonConsecutivePairs) =>
+    nonConsecutivePairsForLogFilesMap.forKeyValue { (fileName, listOfNonConsecutivePairs) =>
       System.err.println(s"Non-consecutive offsets in $fileName")
       listOfNonConsecutivePairs.foreach { case (first, second) =>
         System.err.println(s"  $first is followed by $second")
@@ -212,7 +210,7 @@ object DumpLogSegments {
     }
   }
 
-  private trait MessageParser[K, V] {
+  private[kafka] trait MessageParser[K, V] {
     def parse(record: Record): (Option[K], Option[V])
   }
 
@@ -229,93 +227,6 @@ object DumpLogSegments {
         val payload = Some(valueDecoder.fromBytes(Utils.readBytes(record.value)))
 
         (key, payload)
-      }
-    }
-  }
-
-  private class TransactionLogMessageParser extends MessageParser[String, String] {
-
-    override def parse(record: Record): (Option[String], Option[String]) = {
-      val txnKey = TransactionLog.readTxnRecordKey(record.key)
-      val txnMetadata = TransactionLog.readTxnRecordValue(txnKey.transactionalId, record.value)
-
-      val keyString = s"transactionalId=${txnKey.transactionalId}"
-      val valueString = s"producerId:${txnMetadata.producerId}," +
-        s"producerEpoch:${txnMetadata.producerEpoch}," +
-        s"state=${txnMetadata.state}," +
-        s"partitions=${txnMetadata.topicPartitions}," +
-        s"txnLastUpdateTimestamp=${txnMetadata.txnLastUpdateTimestamp}," +
-        s"txnTimeoutMs=${txnMetadata.txnTimeoutMs}"
-
-      (Some(keyString), Some(valueString))
-    }
-
-  }
-
-  private class OffsetsMessageParser extends MessageParser[String, String] {
-    private def hex(bytes: Array[Byte]): String = {
-      if (bytes.isEmpty)
-        ""
-      else
-        "%X".format(BigInt(1, bytes))
-    }
-
-    private def parseOffsets(offsetKey: OffsetKey, payload: ByteBuffer) = {
-      val group = offsetKey.key.group
-      val topicPartition = offsetKey.key.topicPartition
-      val offset = GroupMetadataManager.readOffsetMessageValue(payload)
-
-      val keyString = s"offset::$group:${topicPartition.topic}:${topicPartition.partition}"
-      val valueString = if (offset.metadata.isEmpty)
-        String.valueOf(offset.offset)
-      else
-        s"${offset.offset}:${offset.metadata}"
-
-      (Some(keyString), Some(valueString))
-    }
-
-    private def parseGroupMetadata(groupMetadataKey: GroupMetadataKey, payload: ByteBuffer) = {
-      val groupId = groupMetadataKey.key
-      val group = GroupMetadataManager.readGroupMessageValue(groupId, payload, Time.SYSTEM)
-      val protocolType = group.protocolType.getOrElse("")
-
-      val assignment = group.allMemberMetadata.map { member =>
-        if (protocolType == ConsumerProtocol.PROTOCOL_TYPE) {
-          val partitionAssignment = ConsumerProtocol.deserializeAssignment(ByteBuffer.wrap(member.assignment))
-          val userData = hex(Utils.toArray(partitionAssignment.userData()))
-
-          if (userData.isEmpty)
-            s"${member.memberId}=${partitionAssignment.partitions()}"
-          else
-            s"${member.memberId}=${partitionAssignment.partitions()}:$userData"
-        } else {
-          s"${member.memberId}=${hex(member.assignment)}"
-        }
-      }.mkString("{", ",", "}")
-
-      val keyString = Json.encodeAsString(Map("metadata" -> groupId).asJava)
-
-      val valueString = Json.encodeAsString(Map(
-        "protocolType" -> protocolType,
-        "protocol" -> group.protocolOrNull,
-        "generationId" -> group.generationId,
-        "assignment" -> assignment
-      ).asJava)
-
-      (Some(keyString), Some(valueString))
-    }
-
-    override def parse(record: Record): (Option[String], Option[String]) = {
-      if (!record.hasValue)
-        (None, None)
-      else if (!record.hasKey) {
-        throw new KafkaException("Failed to decode message using offset topic decoder (message had a missing key)")
-      } else {
-        GroupMetadataManager.readMessageKey(record.key) match {
-          case offsetKey: OffsetKey => parseOffsets(offsetKey, record.value)
-          case groupMetadataKey: GroupMetadataKey => parseGroupMetadata(groupMetadataKey, record.value)
-          case _ => throw new KafkaException("Failed to decode message using offset topic decoder (message had an invalid key)")
-        }
       }
     }
   }
@@ -347,8 +258,12 @@ object DumpLogSegments {
             }
             lastOffset = record.offset
 
-            print(s"$RecordIndent offset: ${record.offset} ${batch.timestampType}: ${record.timestamp} " +
-              s"keysize: ${record.keySize} valuesize: ${record.valueSize}")
+            print(s"$RecordIndent offset: ${record.offset} isValid: ${record.isValid} crc: ${record.checksumOrNull}" +
+                s" keySize: ${record.keySize} valueSize: ${record.valueSize} ${batch.timestampType}: ${record.timestamp}" +
+                s" baseOffset: ${batch.baseOffset} lastOffset: ${batch.lastOffset} baseSequence: ${batch.baseSequence}" +
+                s" lastSequence: ${batch.lastSequence} producerEpoch: ${batch.producerEpoch} partitionLeaderEpoch: ${batch.partitionLeaderEpoch}" +
+                s" batchSize: ${batch.sizeInBytes} magic: ${batch.magic} compressType: ${batch.compressionType} position: ${validBytes}")
+
 
             if (batch.magic >= RecordBatch.MAGIC_VALUE_V2) {
               print(" sequence: " + record.sequence + " headerKeys: " + record.headers.map(_.key).mkString("[", ",", "]"))
@@ -447,6 +362,18 @@ object DumpLogSegments {
           System.err.println(s"Indexed offset: $indexedOffset, found log offset: $logOffset")
         }
       }
+    }
+  }
+
+  private class OffsetsMessageParser extends MessageParser[String, String] {
+    override def parse(record: Record): (Option[String], Option[String]) = {
+      GroupMetadataManager.formatRecordKeyAndValue(record)
+    }
+  }
+
+  private class TransactionLogMessageParser extends MessageParser[String, String] {
+    override def parse(record: Record): (Option[String], Option[String]) = {
+      TransactionLog.formatRecordKeyAndValue(record)
     }
   }
 

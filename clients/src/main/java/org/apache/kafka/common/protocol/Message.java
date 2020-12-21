@@ -47,7 +47,20 @@ public interface Message {
      *                      If the specified version is too new to be supported
      *                      by this software.
      */
-    int size(ObjectSerializationCache cache, short version);
+    default int size(ObjectSerializationCache cache, short version) {
+        MessageSizeAccumulator size = new MessageSizeAccumulator();
+        addSize(size, cache, version);
+        return size.totalSize();
+    }
+
+    /**
+     * Add the size of this message to an accumulator.
+     *
+     * @param size          The size accumulator to add to
+     * @param cache         The serialization size cache to populate.
+     * @param version       The version to use.
+     */
+    void addSize(MessageSizeAccumulator size, ObjectSerializationCache cache, short version);
 
     /**
      * Writes out this message to the given Writable.
@@ -77,11 +90,15 @@ public interface Message {
     void read(Readable readable, short version);
 
     /**
-     * Reads this message from the a Struct object.  This will overwrite all
+     * Reads this message from a Struct object.  This will overwrite all
      * relevant fields with information from the Struct.
      *
      * @param struct        The source struct.
      * @param version       The version to use.
+     *
+     * @throws {@see org.apache.kafka.common.errors.UnsupportedVersionException}
+     *                      If the specified struct can't be processed with the
+     *                      specified message version.
      */
     void fromStruct(Struct struct, short version);
 
@@ -102,4 +119,11 @@ public interface Message {
      * @return              The raw tagged fields.
      */
     List<RawTaggedField> unknownTaggedFields();
+
+    /**
+     * Make a deep copy of the message.
+     *
+     * @return              A copy of the message which does not share any mutable fields.
+     */
+    Message duplicate();
 }
